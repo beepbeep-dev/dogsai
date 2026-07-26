@@ -1,0 +1,17 @@
+# Core
+torch>=2.1
+numpy>=1.24
+av>=10.0                    # video decode/encode, ships its own ffmpeg
+
+# Strongly recommended: fast resize, synthetic renderer, overlay rendering
+opencv-python-headless>=4.8
+
+# Dataset fetching and progress
+huggingface_hub>=0.20
+tqdm>=4.65
+
+# Optional: YAML configs
+PyYAML>=6.0
+
+# Development
+pytest>=7.4
