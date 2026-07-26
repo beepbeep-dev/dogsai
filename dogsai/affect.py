@@ -307,7 +307,7 @@ def read_affect(
     spans: list[BehaviourSpan],
     duration: float,
     known_behaviours: list[str] | None = None,
-    min_score: float = 0.35,
+    min_score: float = 0.0,
 ) -> AffectReading:
     """Aggregate detected behaviour spans into a body-language read.
 
@@ -316,6 +316,14 @@ def read_affect(
     resulting confidence deliberately shrinks when little affect-relevant
     behaviour was detected, when detections were weak, or when the model's
     taxonomy contains few affect-bearing behaviours in the first place.
+
+    ``min_score`` defaults to 0 because spans arrive *already thresholded* by
+    :class:`~dogsai.predict.BehaviourPredictor`, against per-class thresholds
+    fitted on validation data. Applying a second absolute floor here would
+    double-filter, and would break multiclass outright: a softmax winner over
+    five classes sits around 0.3, so any fixed floor tuned for sigmoid scores
+    silently discards every span and reports "not enough to say" on a video the
+    model actually understood. Score is used to *weight* evidence, not to gate it.
     """
     duration = max(duration, 1e-6)
     per_behaviour: dict[str, float] = {}
@@ -327,7 +335,7 @@ def read_affect(
 
     for span in spans:
         contribution = AFFECT_MAP.get(span.behaviour)
-        if contribution is None or span.score < min_score:
+        if contribution is None or span.score < min_score or span.score <= 0:
             continue
         weight = span.duration * span.score * contribution.weight
         if weight <= 0:

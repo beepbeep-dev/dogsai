@@ -220,11 +220,15 @@ class BehaviourPredictor:
         if infer is not None:
             self.config.infer = infer
         saved = self.extra.get("thresholds")
-        self.thresholds = (
-            np.asarray(saved, dtype=np.float64)
-            if saved
-            else np.full(len(self.labels), self.config.infer.threshold)
-        )
+        if saved:
+            self.thresholds = np.asarray(saved, dtype=np.float64)
+        elif self.config.task == "multiclass":
+            # A softmax winner over C classes rarely exceeds 0.5, so the
+            # multilabel default of 0.5 would suppress essentially every
+            # prediction.  The principled floor is "beats a uniform guess".
+            self.thresholds = np.full(len(self.labels), 1.0 / len(self.labels))
+        else:
+            self.thresholds = np.full(len(self.labels), self.config.infer.threshold)
 
     # -- core ------------------------------------------------------------
     @torch.no_grad()

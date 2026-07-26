@@ -207,6 +207,40 @@ cache is keyed on the parameters that determine its contents, so changing
 resolution or frame count invalidates it rather than silently training on a
 mismatched array.
 
+## Measured result on real footage
+
+Trained from random init on the `dogbehaviour` set (973 train / 244 val clips,
+973 independent groups, five behaviours), `nano` preset at 10x112, 26 epochs on
+four CPU cores:
+
+```
+balanced_acc = 0.622    top1 = 0.611    macro_f1 = 0.607    mAP = 0.691
+                                        (chance balanced_acc = 0.200)
+
+behaviour         precision   recall       f1       ap   support
+eliminating          0.786     0.815    0.800    0.877        54
+chewing              0.419     0.750    0.537    0.668        24
+playing              0.536     0.577    0.556    0.668        52
+yawning              0.546     0.500    0.522    0.646        60
+eating_drinking      0.647     0.407    0.500    0.679        54
+
+confusion (row-normalised, rows = truth)
+                 chewin eating elimin playin yawnin
+chewing            0.75   0.08          0.12   0.04
+eating_drinking    0.11   0.41   0.04   0.11   0.33
+eliminating        0.04   0.02   0.81   0.13
+playing            0.15   0.06   0.10   0.58   0.12
+yawning            0.15   0.10   0.08   0.17   0.50
+```
+
+Two honest observations. First, the confusions are the *right* confusions:
+`eliminating` is the most distinctive class (a squat is unmistakable), while a
+third of `eating` clips are called `yawning` — both are open-mouth head motion at
+112px, which is genuinely hard. Second, **this run had not converged.** Validation
+was still improving when the 26-epoch budget ran out (best score was the final
+epoch), so this is a floor, not a ceiling. More epochs, the `small` or `base`
+preset, and a GPU should all move it — see [GPU training](#gpu-training).
+
 ## Data
 
 ```bash

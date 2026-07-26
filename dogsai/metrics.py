@@ -254,7 +254,7 @@ def evaluate_multilabel(
 
 
 def evaluate_multiclass(
-    logits: np.ndarray, targets: np.ndarray, names: list[str]
+    logits: np.ndarray, targets: np.ndarray, names: list[str], tune: bool = True
 ) -> EvalResult:
     logits = _as_numpy(logits).astype(np.float64)
     targets = _as_numpy(targets)
@@ -306,6 +306,19 @@ def evaluate_multiclass(
         if not np.isnan(ap):
             aps.append(ap)
 
+    # Fit a confidence floor per class, as for multilabel.  Inference still takes
+    # the argmax, but a winner below its class threshold is reported as "nothing
+    # confident here" rather than as a detection.  Fitting matters more than it
+    # looks: with C classes a softmax winner rarely exceeds a naive 0.5, so an
+    # unfitted threshold silently suppresses every prediction.
+    thresholds = (
+        tune_thresholds(scores, onehot, default=1.0 / n)
+        if tune
+        else np.full(n, 1.0 / n)
+    )
+    for c, name in enumerate(names):
+        per_class[name]["thresh"] = float(thresholds[c])
+
     return EvalResult(
         task="multiclass",
         names=list(names),
@@ -320,6 +333,7 @@ def evaluate_multiclass(
         },
         per_class=per_class,
         confusion=confusion,
+        thresholds=thresholds,
     )
 
 
