@@ -310,6 +310,90 @@ Three limits, stated plainly because they are how this kind of output misleads:
 If your dog's behaviour worries you, that is a question for a vet or a qualified
 behaviourist who can see the context. Nothing here substitutes for that.
 
+## What is it saying, and what should I do?
+
+```bash
+dogsai translate models/dogbehaviour-nano.pt my_dog.mp4
+```
+
+Three outputs, from two sensors. The video model gives behaviour spans; a
+from-scratch audio analysis gives vocalisations; together they produce a summary,
+a first-person rendering, and suggestions.
+
+```
+summary
+  Over 8 seconds the dog was mostly playing (5.8s), eating drinking (4.3s). It
+  vocalised: bark x2, bark alarm x1, whine x1. Overall it reads as: "Something's
+  out there and I don't like it. Back off."
+
+what your dog is telling you
+  "Something's out there and I don't like it. Back off."
+
+  moment by moment:
+      0.67s  "I'm having a brilliant time. Do not stop doing this."  [playing 0.7-5.7s]
+  !   1.21s  "Something's out there and I don't like it. Back off."  [bark_alarm 1.2s]
+      1.34s  "Please. I need something and I can't sort it myself."  [whine 1.3s]
+
+  note: 2 sound(s) were a person talking, not the dog, and were ignored
+  note: the video and the audio disagree: what the dog was doing looks positive,
+        but it made a sound (bark_alarm) that does not.
+
+what to do
+   - Identify what triggered it and reduce the exposure — distance, a barrier, or
+     blocking the line of sight — rather than trying to out-shout it.
+     (because: low, harsh, repeated barking)
+```
+
+Every line traces back to a detection you can inspect. Three things this
+deliberately does not do:
+
+**It does not decode words.** Dogs communicate constantly, but not in language —
+there is no sentence inside a bark to recover. What `translate` does is carry
+*meaning* across from one signalling system into another, which is a real
+translation in the useful sense and not one in the sense of decoding speech. The
+first person is presentation; the grounding is the detection list.
+
+**It does not average away a conflict.** A yelp during play is the informative
+signal, so it takes over the headline instead of being blended into a cheerful
+average — and the disagreement between channels is stated outright.
+
+**It does not guess who made a sound.** People talk to their dogs while filming
+them, and human speech occupies the same acoustic region as a howl or growl
+(sustained, tonal, 85-300 Hz). Speech is detected, labelled as not-the-dog, and
+excluded from every aggregate — without that guard the commonest sound in a home
+video gets confidently attributed to the dog.
+
+### The audio side
+
+```bash
+dogsai listen my_dog.mp4     # vocalisations only, no model needed
+```
+
+Written from scratch on numpy: framing, magnitude STFT, spectral centroid,
+spectral flatness (the tonality axis), and autocorrelation pitch tracking.
+Vocalisations are typed as bark (split into alarm/excited by pitch and tonality),
+growl, whine, howl, yelp or panting, following the published structure-to-context
+mapping — low and harsh skews agonistic, high and tonal skews fear/play, rapid
+repetition means arousal.
+
+The pitch tracker earns its complexity by handling octave errors in both
+directions, which is the central difficulty of autocorrelation pitch estimation.
+A 1200 Hz tone at 16 kHz has a period of 13.33 samples; three periods is exactly
+40, so the autocorrelation peak at 400 Hz is *taller* than the true one and naive
+argmax reports a third of the real pitch. Preferring the shortest lag fixes that
+and breaks the opposite case, where a genuine 300 Hz fundamental under a louder
+600 Hz harmonic gets reported as 600. Neither preference is right alone, so
+candidates are validated against the spectrum: a real fundamental has audible
+energy at its own frequency, a spurious sub-harmonic has none.
+
+Two honest limits. The typing is **rule-based DSP, not a trained classifier** —
+thresholds come from the literature, not from fitting labelled barks, so treat the
+type as a well-motivated guess. And the advice is a **fixed rule set**, because
+there is no dataset of "dog did X, owner should do Y" to learn from; a model that
+generated advice anyway would be producing ungrounded text about someone's pet.
+It stays away from anything medical or aversive, and routes yelps, persistent
+scratching and unproductive straining to a vet.
+
 ## Inference
 
 Per-window scores become intervals a human would agree with:

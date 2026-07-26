@@ -85,6 +85,12 @@ def _coerce(raw: str, current):
     return raw
 
 
+def _wrap(text: str, width: int = 74) -> list[str]:
+    import textwrap
+
+    return textwrap.wrap(text, width=width) or [""]
+
+
 def _labels_from(config: Config, path: str | None) -> LabelSpace:
     if path:
         names = [n.strip() for n in Path(path).read_text().splitlines() if n.strip()]
@@ -424,10 +430,59 @@ def cmd_feeling(args: argparse.Namespace) -> int:
     print(prediction.timeline())
     print()
     print(reading.render())
+    print()
+    print(prediction.audio().render())
+    print()
+    print(prediction.translation().render())
     if args.json:
         Path(args.json).write_text(
             json.dumps({**prediction.to_dict(), "affect": reading.to_dict()}, indent=2) + "\n"
         )
+        print(f"\nwrote {args.json}")
+    return 0
+
+
+def cmd_translate(args: argparse.Namespace) -> int:
+    from .predict import BehaviourPredictor
+
+    predictor = BehaviourPredictor(args.checkpoint, device=args.device)
+    prediction = predictor.predict(args.video)
+    translation = prediction.translation()
+
+    print(f"=== {args.video}  ({prediction.meta.duration:.1f}s)\n")
+    print(prediction.timeline())
+    print()
+    print("summary")
+    print("=" * 7)
+    print()
+    for line in _wrap(prediction.summary(), 74):
+        print(f"  {line}")
+    print()
+    print(translation.render())
+    print()
+    print(prediction.advice().render())
+    if args.detail:
+        print()
+        print(prediction.audio().render())
+        print()
+        print(prediction.affect().render())
+    if args.json:
+        Path(args.json).write_text(json.dumps(prediction.to_dict(), indent=2) + "\n")
+        print(f"\nwrote {args.json}")
+    return 0
+
+
+def cmd_listen(args: argparse.Namespace) -> int:
+    from .audio import has_audio, read_audio
+
+    if not has_audio(args.video):
+        print(f"{args.video} has no audio track.", file=sys.stderr)
+        return 1
+    reading = read_audio(args.video)
+    print(f"=== {args.video}  ({reading.duration:.1f}s)\n")
+    print(reading.render())
+    if args.json:
+        Path(args.json).write_text(json.dumps(reading.to_dict(), indent=2) + "\n")
         print(f"\nwrote {args.json}")
     return 0
 
@@ -610,6 +665,25 @@ def build_parser() -> argparse.ArgumentParser:
     feeling.add_argument("--device", default=None)
     feeling.add_argument("--json", default=None)
     feeling.set_defaults(func=cmd_feeling)
+
+    translate = subparsers.add_parser(
+        "translate",
+        help="say what the dog is communicating, from what it did and what it said",
+    )
+    translate.add_argument("checkpoint")
+    translate.add_argument("video")
+    translate.add_argument("--device", default=None)
+    translate.add_argument("--detail", action="store_true",
+                           help="also print the raw audio and body-language reads")
+    translate.add_argument("--json", default=None)
+    translate.set_defaults(func=cmd_translate)
+
+    listen = subparsers.add_parser(
+        "listen", help="analyse only the audio: detect and type vocalisations"
+    )
+    listen.add_argument("video")
+    listen.add_argument("--json", default=None)
+    listen.set_defaults(func=cmd_listen)
 
     info = subparsers.add_parser("info", help="model size, MACs and measured latency")
     _add_common(info)

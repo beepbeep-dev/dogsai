@@ -27,12 +27,15 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from .advise import Advice
 from .affect import AffectReading
+from .audio import AudioReading
 from .config import Config, InferenceConfig
 from .dataset import SlidingWindowDataset
 from .engine import load_checkpoint
 from .labels import AROUSAL_FLAGS, BehaviourSpan, LabelSpace
 from .model import DogBehaviourNet
+from .translate import Translation
 from .video import VideoMeta
 
 
@@ -107,6 +110,7 @@ class VideoPrediction:
     scores: np.ndarray  # (n_windows, n_classes), post-smoothing
     spans: list[BehaviourSpan] = field(default_factory=list)
     thresholds: np.ndarray | None = None
+    _audio: "AudioReading | None" = field(default=None, repr=False)
 
     # -- aggregates ------------------------------------------------------
     def time_per_behaviour(self) -> dict[str, float]:
@@ -153,6 +157,60 @@ class VideoPrediction:
 
         return read_affect(self.spans, self.meta.duration, known_behaviours=self.behaviours)
 
+    def audio(self) -> "AudioReading":
+        """Detect and type the dog's vocalisations in this clip."""
+        from .audio import read_audio
+
+        if self._audio is None:
+            self._audio = read_audio(self.video)
+        return self._audio
+
+    def translation(self) -> "Translation":
+        """First-person rendering of what the dog is communicating.
+
+        See :mod:`dogsai.translate`: dogs communicate but do not use words, so
+        this carries meaning across from behaviour and voice into English rather
+        than decoding speech.
+        """
+        from .translate import translate
+
+        return translate(
+            spans=self.spans,
+            audio=self.audio(),
+            affect=self.affect(),
+            duration=self.meta.duration,
+        )
+
+    def advice(self) -> "Advice":
+        """What to do about what was detected (rule-based; see :mod:`dogsai.advise`)."""
+        from .advise import advise
+
+        return advise(spans=self.spans, audio=self.audio(), affect=self.affect())
+
+    def summary(self) -> str:
+        """One-paragraph plain-English account of the whole clip."""
+        totals = self.time_per_behaviour()
+        translation = self.translation()
+        pieces: list[str] = []
+        if totals:
+            named = ", ".join(f"{k.replace('_', ' ')} ({v:.1f}s)" for k, v in list(totals.items())[:3])
+            pieces.append(f"Over {self.meta.duration:.0f} seconds the dog was mostly {named}.")
+        voice = [e for e in self.audio().events if e.kind not in ("sound", "speech")]
+        if voice:
+            kinds = {}
+            for event in voice:
+                kinds[event.kind] = kinds.get(event.kind, 0) + 1
+            pieces.append(
+                "It vocalised: " + ", ".join(f"{k.replace('_', ' ')} x{v}" for k, v in kinds.items()) + "."
+            )
+        else:
+            pieces.append("It was quiet throughout.")
+        pieces.append(f'Overall it reads as: "{translation.headline}"')
+        advice = self.advice()
+        if advice.urgent:
+            pieces.append("Something here is worth your attention now — see the suggestions.")
+        return " ".join(pieces)
+
     def to_dict(self) -> dict:
         return {
             "video": self.video,
@@ -167,6 +225,10 @@ class VideoPrediction:
             "arousal_fraction": round(self.arousal_fraction(), 4),
             "spans": [span.to_dict() for span in self.spans],
             "affect": self.affect().to_dict(),
+            "audio": self.audio().to_dict(),
+            "translation": self.translation().to_dict(),
+            "advice": self.advice().to_dict(),
+            "summary": self.summary(),
         }
 
     def save_json(self, path: str | Path) -> Path:

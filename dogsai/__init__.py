@@ -26,7 +26,9 @@ Training from Python::
     Trainer(config, train, val, labels).fit()
 """
 
+from .advise import Advice, advise
 from .affect import AffectReading, read_affect
+from .audio import AudioReading, read_audio
 from .audit import AuditReport, audit_annotations, audit_splits
 from .cache import CachedClipDataset, CacheSpec, build_cache
 from .config import Config, DataConfig, InferenceConfig, ModelConfig, TrainConfig
@@ -45,6 +47,7 @@ from .labels import DEFAULT_BEHAVIOURS, BehaviourSpan, LabelSpace
 from .metrics import EvalResult, evaluate
 from .model import DogBehaviourNet, build_model
 from .predict import BehaviourPredictor, VideoPrediction
+from .translate import Translation, translate
 
 __version__ = "0.1.0"
 
@@ -83,6 +86,14 @@ __all__ = [
     # affect
     "AffectReading",
     "read_affect",
+    # audio
+    "AudioReading",
+    "read_audio",
+    # translation + advice
+    "Translation",
+    "translate",
+    "Advice",
+    "advise",
     # model + training
     "DogBehaviourNet",
     "build_model",
