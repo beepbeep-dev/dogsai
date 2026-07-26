@@ -24,22 +24,35 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
 
 def _load_config(args: argparse.Namespace) -> Config:
     config = Config.load(args.config) if getattr(args, "config", None) else Config()
-    if getattr(args, "config", None) is None:
-        config.apply_preset()
-    for override in getattr(args, "set", []) or []:
+    overrides = list(getattr(args, "set", []) or [])
+    for override in overrides:
         if "=" not in override:
             raise SystemExit(f"--set needs KEY=VALUE, got {override!r}")
+
+    # A preset is a *base*, so it is resolved first and explicit --set overrides
+    # are applied on top. Doing it the other way round means
+    # `--set model.preset=nano --set data.image_size=112` silently trains at the
+    # preset's resolution and ignores the 112 — a genuinely confusing failure.
+    preset = next(
+        (o.split("=", 1)[1].strip() for o in overrides if o.split("=", 1)[0].strip() == "model.preset"),
+        None,
+    )
+    if preset is not None:
+        config.model.preset = preset  # type: ignore[assignment]
+        config.apply_preset()
+    elif getattr(args, "config", None) is None:
+        config.apply_preset()
+
+    for override in overrides:
         key, raw = override.split("=", 1)
         _assign(config, key.strip(), raw.strip())
+
     if getattr(args, "data_root", None):
         config.data.root = args.data_root
     if getattr(args, "out_dir", None):
         config.train.out_dir = args.out_dir
     if getattr(args, "task", None):
         config.task = args.task
-    # Re-resolve the preset only if the user asked for one explicitly by name.
-    if any(o.startswith("model.preset") for o in getattr(args, "set", []) or []):
-        config.apply_preset()
     return config
 
 
@@ -199,19 +212,52 @@ def cmd_train(args: argparse.Namespace) -> int:
     cache = root / ".dogsai_meta.json"
 
     train_annotations = discover_split(root, config.data.train_split)
-    train_set = ClipDataset(
-        train_annotations, labels, config.data, config.task,
-        training=True, cache_path=cache, seed=config.train.seed,
-    )
-    val_set = None
+    val_annotations = None
     try:
         val_annotations = discover_split(root, config.data.val_split)
-        val_set = ClipDataset(
-            val_annotations, labels, config.data, config.task,
-            training=False, cache_path=cache, seed=config.train.seed,
-        )
     except FileNotFoundError:
         print(f"no {config.data.val_split} split found — training without validation")
+
+    if args.cache:
+        # Decode once, then train off a memmapped uint8 array. On real footage
+        # this is the difference between minutes and seconds per epoch.
+        from .cache import CacheSpec, CachedClipDataset, build_split_caches, estimate_cache_size
+
+        spec = CacheSpec(frames=args.cache_frames, size=args.cache_size)
+        total = len(train_annotations) + (len(val_annotations) if val_annotations else 0)
+        print(f"clip cache: {spec.frames} frames at {spec.size}px, "
+              f"~{estimate_cache_size(total, spec):.2f} GB total")
+        splits = {config.data.train_split: train_annotations}
+        if val_annotations:
+            splits[config.data.val_split] = val_annotations
+        dirs = build_split_caches(
+            splits, root, spec, workers=max(1, config.data.num_workers), force=args.rebuild_cache
+        )
+        train_set = CachedClipDataset(
+            dirs[config.data.train_split], labels, config.data, config.task,
+            training=True, seed=config.train.seed,
+        )
+        val_set = (
+            CachedClipDataset(
+                dirs[config.data.val_split], labels, config.data, config.task,
+                training=False, seed=config.train.seed,
+            )
+            if val_annotations
+            else None
+        )
+    else:
+        train_set = ClipDataset(
+            train_annotations, labels, config.data, config.task,
+            training=True, cache_path=cache, seed=config.train.seed,
+        )
+        val_set = (
+            ClipDataset(
+                val_annotations, labels, config.data, config.task,
+                training=False, cache_path=cache, seed=config.train.seed,
+            )
+            if val_annotations
+            else None
+        )
 
     for dataset, name in ((train_set, "train"), (val_set, "val")):
         if dataset and dataset.skipped:
@@ -495,6 +541,16 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--task", choices=["multiclass", "multilabel"], default=None)
     train.add_argument("--behaviours", default=None, help="text file, one behaviour per line")
     train.add_argument("--device", default=None)
+    train.add_argument("--cache", action="store_true",
+                       help="decode every clip once into a memmapped array first; "
+                            "usually a large speedup, at some augmentation diversity")
+    train.add_argument("--cache-frames", type=int, default=32,
+                       help="frames stored per clip; must exceed data.clip_frames "
+                            "so temporal jitter survives")
+    train.add_argument("--cache-size", type=int, default=176,
+                       help="cached resolution; must exceed data.image_size so "
+                            "random-resized-crop still has pixels to pick")
+    train.add_argument("--rebuild-cache", action="store_true")
     train.set_defaults(func=cmd_train)
 
     evaluate = subparsers.add_parser("eval", help="evaluate a checkpoint on a split")

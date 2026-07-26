@@ -95,6 +95,14 @@ classifier               -> (B, num_classes)
 ¹ single clip, batch 1, 4-core CPU, no GPU. For scale, R(2+1)D-18 is 33 M
 parameters and ~40 GMACs — the `small` preset is ~33x cheaper.
 
+One caveat worth stating, because MACs alone would oversell this: **depthwise 3-D
+convolutions are FLOP-efficient but poorly served by CPU kernels.** Measured
+training throughput on four CPU cores was 9.5 clips/s at 10x112 and only ~2 clips/s
+at 12x128 — far below what the FLOP count implies, and it scales steeply with
+resolution. The architecture's efficiency is real, but it is realised on a GPU, and
+on CPU you should expect to train at low resolution or not at all. Inference is
+fine either way: 44 ms per clip at the `nano` preset is ~18x faster than realtime.
+
 Five design decisions carry most of that efficiency, and each is commented where
 it lives:
 
@@ -172,6 +180,32 @@ rather than its edge.
 multi-label data — a clip labelled `["running","barking"]` cannot be "a barking
 sample". Each class gets a factor `sqrt(t/f_c)`, each sample the max over its
 labels, redrawn every epoch.
+
+## Decode once, not every epoch
+
+Video training is decode-bound, not compute-bound. On the real dataset above this
+pipeline measured **2.5 clips/s** on four CPU cores — and the model's forward and
+backward pass was a small minority of that. Every epoch was re-decoding the same
+H.264 bitstreams to produce the same pixels.
+
+```bash
+dogsai train --data-root dogsai_data/prepared --cache \
+             --cache-frames 24 --cache-size 144
+```
+
+`--cache` decodes each annotated span once into a memory-mapped `uint8` array and
+trains off that. 973 clips at 24 frames of 144px is 1.45 GB, and epoch time drops
+from minutes to seconds.
+
+The cache deliberately stores *more* frames and *more* pixels than a training clip
+needs, so augmentation survives: a different temporal subset each epoch, and
+random-resized-crop with real pixels to choose from. What is given up is crops at
+source resolution and sub-stride temporal offsets. On a large dataset with many
+epochs the uncached path is still better; on anything where decode dominates —
+which is most animal-behaviour datasets — the trade is strongly worth it. The
+cache is keyed on the parameters that determine its contents, so changing
+resolution or frame count invalidates it rather than silently training on a
+mismatched array.
 
 ## Data
 

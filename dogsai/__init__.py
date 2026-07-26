@@ -26,8 +26,11 @@ Training from Python::
     Trainer(config, train, val, labels).fit()
 """
 
+from .affect import AffectReading, read_affect
 from .audit import AuditReport, audit_annotations, audit_splits
+from .cache import CachedClipDataset, CacheSpec, build_cache
 from .config import Config, DataConfig, InferenceConfig, ModelConfig, TrainConfig
+from .datasets_hub import REGISTRY, download, prepare
 from .dataset import (
     Annotation,
     ClipDataset,
@@ -65,10 +68,21 @@ __all__ = [
     "load_annotations",
     "save_annotations",
     "make_splits",
+    # clip cache
+    "CacheSpec",
+    "CachedClipDataset",
+    "build_cache",
+    # public datasets
+    "REGISTRY",
+    "download",
+    "prepare",
     # audit
     "AuditReport",
     "audit_annotations",
     "audit_splits",
+    # affect
+    "AffectReading",
+    "read_affect",
     # model + training
     "DogBehaviourNet",
     "build_model",
