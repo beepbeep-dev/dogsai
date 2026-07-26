@@ -267,3 +267,63 @@ class TestExportPath:
         assert stats["clips_per_second"] > 0
         assert stats["parameters_m"] > 0
         assert stats["macs_g"] > 0
+
+
+class TestResume:
+    def _setup(self, tmp_path, mini_dataset, epochs):
+        config = tiny_config(tmp_path)
+        config.train.epochs = epochs
+        labels = LabelSpace.from_names(config.behaviours)
+        train, val = build_datasets(mini_dataset, config, labels)
+        return Trainer(config, train, val, labels, device="cpu", verbose=False), config
+
+    def test_continues_from_the_saved_epoch(self, tmp_path, mini_dataset):
+        first, _ = self._setup(tmp_path, mini_dataset, epochs=2)
+        first.fit()
+        assert len(first.state.history) == 2
+
+        second, _ = self._setup(tmp_path, mini_dataset, epochs=4)
+        second.resume(tmp_path / "run" / "last.pt")
+        assert second.state.epoch == 2
+        second.fit()
+        # Two more epochs run, and the restored history is carried forward.
+        assert len(second.state.history) == 4
+        assert [r["epoch"] for r in second.state.history] == [1, 2, 3, 4]
+
+    def test_restores_weights_exactly(self, tmp_path, mini_dataset):
+        first, config = self._setup(tmp_path, mini_dataset, epochs=1)
+        first.fit()
+        reference = {k: v.clone() for k, v in first.model.state_dict().items()}
+
+        second, _ = self._setup(tmp_path, mini_dataset, epochs=2)
+        second.resume(tmp_path / "run" / "last.pt")
+        for key, value in second.model.state_dict().items():
+            assert torch.allclose(value.float(), reference[key].float(), atol=1e-6), key
+
+    def test_restores_the_best_metric_so_early_stopping_is_not_reset(self, tmp_path, mini_dataset):
+        first, _ = self._setup(tmp_path, mini_dataset, epochs=2)
+        first.fit()
+        second, _ = self._setup(tmp_path, mini_dataset, epochs=4)
+        second.resume(tmp_path / "run" / "last.pt")
+        assert second.state.best_metric > -float("inf")
+
+    def test_weights_only_restarts_the_schedule(self, tmp_path, mini_dataset):
+        first, _ = self._setup(tmp_path, mini_dataset, epochs=2)
+        first.fit()
+        second, _ = self._setup(tmp_path, mini_dataset, epochs=2)
+        second.resume(tmp_path / "run" / "last.pt", weights_only=True)
+        assert second.state.epoch == 0
+        assert second.state.step == 0
+
+    def test_mismatched_label_space_is_refused(self, tmp_path, mini_dataset):
+        """Resuming onto a different taxonomy would silently corrupt the head."""
+        first, _ = self._setup(tmp_path, mini_dataset, epochs=1)
+        first.fit()
+
+        config = tiny_config(tmp_path, behaviours=["standing", "running", "playing"])
+        config.train.out_dir = str(tmp_path / "run2")
+        labels = LabelSpace.from_names(config.behaviours)
+        train, val = build_datasets(mini_dataset, config, labels)
+        other = Trainer(config, train, val, labels, device="cpu", verbose=False)
+        with pytest.raises(ValueError, match="label space"):
+            other.resume(tmp_path / "run" / "last.pt")

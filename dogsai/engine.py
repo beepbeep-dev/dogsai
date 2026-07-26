@@ -267,6 +267,65 @@ class Trainer:
         self.state = TrainState()
         self.thresholds: np.ndarray | None = None
 
+    # -- resume ----------------------------------------------------------
+    def resume(self, path: str | Path, weights_only: bool = False) -> None:
+        """Continue from a checkpoint.
+
+        ``weights_only=True`` restarts the schedule and the optimiser — the right
+        choice when fine-tuning onto different data or changing the learning rate.
+        Otherwise the optimiser state, EMA shadow, epoch counter and history are
+        all restored, so a run cut short by an epoch budget or a preemption picks
+        up where it stopped instead of relearning from random init.
+
+        The label space is checked rather than assumed: silently resuming onto a
+        different taxonomy would train a head whose outputs mean something other
+        than what the checkpoint claims.
+        """
+        payload = torch.load(path, map_location=self.device, weights_only=False)
+        saved_labels = payload.get("behaviours", [])
+        if saved_labels and saved_labels != self.labels.to_list():
+            raise ValueError(
+                "checkpoint label space does not match this run:\n"
+                f"  checkpoint: {saved_labels}\n"
+                f"  this run  : {self.labels.to_list()}"
+            )
+        target = self.model
+        missing, unexpected = target.load_state_dict(payload["model"], strict=False)
+        if missing or unexpected:
+            raise RuntimeError(
+                f"checkpoint weights do not fit this model "
+                f"(missing={list(missing)[:4]}, unexpected={list(unexpected)[:4]})"
+            )
+        if self.ema is not None and payload.get("ema"):
+            self.ema.load_state_dict(payload["ema"])
+        if payload.get("thresholds"):
+            self.thresholds = np.asarray(payload["thresholds"], dtype=np.float64)
+
+        if weights_only:
+            if self.verbose:
+                print(f"resumed weights from {path} (fresh optimiser and schedule)")
+            return
+
+        if payload.get("optimiser"):
+            self.optimiser.load_state_dict(payload["optimiser"])
+        self.state.epoch = int(payload.get("epoch", 0))
+        self.state.step = self.state.epoch * self.steps_per_epoch
+        metrics = payload.get("metrics") or {}
+        if "primary" in metrics:
+            self.state.best_metric = float(metrics["primary"])
+            self.state.best_epoch = self.state.epoch - 1
+        history_path = Path(path).parent / "history.json"
+        if history_path.exists():
+            try:
+                self.state.history = json.loads(history_path.read_text())
+            except Exception:
+                pass
+        if self.verbose:
+            print(
+                f"resumed from {path} at epoch {self.state.epoch}"
+                + (f", best {self.state.best_metric:.4f}" if self.state.best_metric > -float("inf") else "")
+            )
+
     # -- setup helpers ---------------------------------------------------
     def _build_criterion(self, positive_rate: np.ndarray) -> nn.Module:
         cfg = self.config.train
@@ -413,8 +472,9 @@ class Trainer:
             )
         self.config.save(self.out_dir / "config.json")
         since_improved = 0
+        start_epoch = self.state.epoch  # non-zero after resume()
 
-        for epoch in range(cfg.epochs):
+        for epoch in range(start_epoch, cfg.epochs):
             self.state.epoch = epoch
             train_stats = self.train_one_epoch()
             result = self.evaluate()

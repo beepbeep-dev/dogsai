@@ -265,6 +265,8 @@ def cmd_train(args: argparse.Namespace) -> int:
                   f"(first: {dataset.skipped[0][0]} — {dataset.skipped[0][1]})")
 
     trainer = Trainer(config, train_set, val_set, labels, device=args.device)
+    if args.resume:
+        trainer.resume(args.resume, weights_only=args.resume_weights_only)
     trainer.fit()
 
     result = trainer.evaluate()
@@ -551,6 +553,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="cached resolution; must exceed data.image_size so "
                             "random-resized-crop still has pixels to pick")
     train.add_argument("--rebuild-cache", action="store_true")
+    train.add_argument("--resume", default=None, metavar="CHECKPOINT",
+                       help="continue a run: restores weights, optimiser, EMA and epoch")
+    train.add_argument("--resume-weights-only", action="store_true",
+                       help="load weights but restart the optimiser and schedule "
+                            "(for fine-tuning onto other data)")
     train.set_defaults(func=cmd_train)
 
     evaluate = subparsers.add_parser("eval", help="evaluate a checkpoint on a split")

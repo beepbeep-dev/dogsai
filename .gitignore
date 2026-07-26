@@ -11,6 +11,8 @@ dogsai_data/
 runs/
 *.pt
 *.pth
+# ...but the shipped, documented checkpoint is the point of the repo
+!models/*.pt
 *.onnx
 *.ts.pt
 *.meta.json
