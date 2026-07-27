@@ -39,6 +39,9 @@ import urllib.request
 from pathlib import Path
 
 API = "https://console.vast.ai/api/v0"
+# Some endpoints have been moved to v1; call() picks per-path.
+API_V1 = "https://console.vast.ai/api/v1"
+V1_PATHS = ("/instances/",)
 STATE_PATH = Path.home() / ".dogsai_vast_run.json"
 
 # Provisioning script run on the instance at boot. Kept dependency-light and
@@ -54,10 +57,8 @@ python3 -m pip install -q --upgrade pip
 python3 -m pip install -q av opencv-python-headless huggingface_hub tqdm numpy
 
 cd /root
-if [ ! -d dogsai ]; then
-  git clone --depth 1 --branch "__BRANCH__" "__REPO__" dogsai
-fi
-cd dogsai
+__FETCH_SOURCE__
+cd /root/dogsai
 python3 -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
 
 # Fetch + convert the dataset (resumable; skips what is already there).
@@ -88,6 +89,44 @@ echo "=== dogsai finished $(date -u) ==="
 """
 
 
+# Two ways to get the code onto the instance. Cloning is cleaner but only works
+# for a public repo; embedding a base64 tarball works regardless and avoids both
+# making a private repo public and shipping a git credential to a third-party
+# host, neither of which is an acceptable price for a training run.
+_CLONE = 'git clone --depth 1 --branch "{branch}" "{repo}" dogsai'
+_EMBED = """mkdir -p /root/dogsai
+cat > /root/src.b64 <<'DOGSAI_EOF'
+{payload}
+DOGSAI_EOF
+base64 -d /root/src.b64 | tar xzf - -C /root/dogsai
+echo "source unpacked: $(find /root/dogsai -name '*.py' | wc -l) python files"
+"""
+
+
+def source_payload(repo_root: Path) -> str:
+    """gzip+base64 the package so it can travel inside the boot script."""
+    import base64
+    import io
+    import tarfile
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name in ("dogsai", "pyproject.toml", "requirements.txt"):
+            path = repo_root / name
+            if not path.exists():
+                continue
+            archive.add(
+                path,
+                arcname=name,
+                filter=lambda info: None
+                if ("__pycache__" in info.name or info.name.endswith(".pyc"))
+                else info,
+            )
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+    # Wrap so the heredoc lines stay a sane width.
+    return "\n".join(encoded[i : i + 200] for i in range(0, len(encoded), 200))
+
+
 # ---------------------------------------------------------------------------
 # api plumbing
 # ---------------------------------------------------------------------------
@@ -106,7 +145,8 @@ def api_key() -> str:
 
 
 def call(path: str, method: str = "GET", payload: dict | None = None) -> dict:
-    url = f"{API}{path}"
+    base = API_V1 if path in V1_PATHS else API
+    url = f"{base}{path}"
     data = json.dumps(payload).encode() if payload is not None else None
     request = urllib.request.Request(url, data=data, method=method)
     request.add_header("Authorization", f"Bearer {api_key()}")
@@ -151,9 +191,20 @@ def find_offers(args) -> list[dict]:
     }
     if args.gpu_name:
         query["gpu_name"] = {"eq": args.gpu_name}
-    result = call("/bundles/", method="PUT", payload={"q": query})
-    offers = result.get("offers", [])
-    return offers
+    # Vast has moved this endpoint before; try the current one first and fall
+    # back, so a server-side rename degrades to a clear error rather than a 404
+    # with no explanation.
+    last: Exception | None = None
+    for path in ("/search/asks/", "/bundles/"):
+        try:
+            result = call(path, method="PUT", payload={"q": query})
+        except SystemExit as exc:
+            last = exc
+            continue
+        offers = result.get("offers", [])
+        if offers or "offers" in result:
+            return offers
+    raise SystemExit(f"could not search offers: {last}")
 
 
 def cmd_offers(args) -> int:
@@ -202,8 +253,16 @@ def cmd_launch(args) -> int:
         print("re-run with --yes to actually create the instance.")
         return 0
 
+    repo_root = Path(__file__).resolve().parent.parent
+    if args.embed_source:
+        fetch = _EMBED.format(payload=source_payload(repo_root))
+        print(f"embedding source in the boot script ({len(fetch) / 1024:.0f} KB)")
+    else:
+        fetch = _CLONE.format(branch=args.branch, repo=args.repo)
+
     onstart = (
-        ONSTART.replace("__REPO__", args.repo)
+        ONSTART.replace("__FETCH_SOURCE__", fetch)
+        .replace("__REPO__", args.repo)
         .replace("__BRANCH__", args.branch)
         .replace("__DATASET__", args.dataset)
         .replace("__PRESET__", args.preset)
@@ -245,7 +304,16 @@ def cmd_launch(args) -> int:
 
 def _instance(instance_id: int) -> dict:
     payload = call(f"/instances/{instance_id}/")
-    return payload.get("instances", payload) or {}
+    found = payload.get("instances", payload) or {}
+    if isinstance(found, list):
+        found = next((i for i in found if i.get("id") == instance_id), {})
+    return found
+
+
+def list_instances() -> list[dict]:
+    payload = call("/instances/")
+    found = payload.get("instances", payload)
+    return found if isinstance(found, list) else []
 
 
 def cmd_status(args) -> int:
@@ -263,6 +331,39 @@ def cmd_status(args) -> int:
     print(f"\n  training log:  ssh ... 'tail -f /root/dogsai_run.log'")
     print(f"  done marker :  /root/DOGSAI_DONE")
     return 0
+
+
+def cmd_logs(args) -> int:
+    """Fetch the instance's console log through the Vast API.
+
+    Vast serves logs indirectly: you ask for them, it writes them to a URL, you
+    then GET that. This exists because SSH egress is frequently blocked (CI
+    runners, sandboxes, locked-down networks), and without it there is no way to
+    see whether a run is progressing.
+    """
+    state = load_state()
+    instance_id = state["instance_id"]
+    response = call(f"/instances/request_logs/{instance_id}/", method="PUT",
+                    payload={"tail": str(args.tail)})
+    url = response.get("result_url")
+    if not url:
+        print(f"no log url returned: {response}")
+        return 1
+    # The file appears a moment after the request.
+    for attempt in range(args.retries):
+        time.sleep(args.wait)
+        try:
+            with urllib.request.urlopen(url, timeout=60) as handle:
+                text = handle.read().decode(errors="replace")
+            if text.strip():
+                print(text[-args.bytes:])
+                return 0
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (403, 404):
+                raise
+        print(f"  log not ready yet (attempt {attempt + 1}/{args.retries})")
+    print("log did not become available; try again shortly")
+    return 1
 
 
 def cmd_fetch_run(args) -> int:
@@ -293,6 +394,21 @@ def cmd_destroy(args) -> int:
     print(f"destroyed {instance_id}. ran {elapsed:.2f}h, "
           f"~${elapsed * state['price_per_hour']:.2f} of GPU time.")
     STATE_PATH.unlink(missing_ok=True)
+    return 0
+
+
+def cmd_instances(args) -> int:
+    found = list_instances()
+    if not found:
+        print("no instances — nothing is being billed.")
+        return 0
+    total = 0.0
+    for instance in found:
+        rate = instance.get("dph_total", 0.0)
+        total += rate
+        print(f"  id={instance.get('id')} {instance.get('actual_status')} "
+              f"${rate:.3f}/hr  {instance.get('gpu_name')}")
+    print(f"\ntotal burn: ${total:.3f}/hr")
     return 0
 
 
@@ -334,11 +450,23 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--image", default="pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime")
     launch.add_argument("--repo", default="https://github.com/beepbeep-dev/dogsai.git")
     launch.add_argument("--branch", default="claude/dog-behavior-detection-ai-xt072k")
+    launch.add_argument("--embed-source", action="store_true", default=True,
+                        help="ship the code inside the boot script instead of cloning "
+                             "(required for a private repo)")
+    launch.add_argument("--clone", dest="embed_source", action="store_false",
+                        help="clone from --repo instead; only works if it is public")
     launch.add_argument("--yes", action="store_true", help="actually spend money")
     launch.set_defaults(func=cmd_launch)
 
     status = subparsers.add_parser("status", help="check the running instance")
     status.set_defaults(func=cmd_status)
+
+    logs = subparsers.add_parser("logs", help="read the instance console log via the API")
+    logs.add_argument("--tail", type=int, default=2000)
+    logs.add_argument("--bytes", type=int, default=8000)
+    logs.add_argument("--wait", type=float, default=6.0)
+    logs.add_argument("--retries", type=int, default=6)
+    logs.set_defaults(func=cmd_logs)
 
     fetch = subparsers.add_parser("fetch-run", help="print commands to copy results back")
     fetch.set_defaults(func=cmd_fetch_run)
@@ -346,6 +474,11 @@ def build_parser() -> argparse.ArgumentParser:
     destroy = subparsers.add_parser("destroy", help="destroy the instance and stop billing")
     destroy.add_argument("--yes", action="store_true")
     destroy.set_defaults(func=cmd_destroy)
+
+    instances = subparsers.add_parser(
+        "instances", help="list running instances (check nothing is quietly billing)"
+    )
+    instances.set_defaults(func=cmd_instances)
 
     whoami = subparsers.add_parser("whoami", help="verify the key and show credit")
     whoami.set_defaults(func=cmd_whoami)

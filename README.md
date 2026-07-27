@@ -416,15 +416,79 @@ Exports are self-contained — the motion stem lives inside the graph — and wr
 `.meta.json` sidecar with the labels, normalisation and tuned thresholds, since
 neither TorchScript nor ONNX has anywhere sensible to keep them.
 
+## The second model: DogNarrator
+
+A Transformer decoder — also written from scratch on `torch.nn` — that generates a
+sentence describing a clip. It conditions on a vector packing the behaviour
+distribution from the video model, the audio summary (vocalisation counts, arousal,
+valence, vocal fraction) and clip duration, projects that into a short prefix, and
+decodes tokens causally. 0.74 M parameters.
+
+```bash
+dogsai train-narrator --data-root dogsai_data/prepared \
+                      --behaviours dogsai_data/prepared/behaviours.txt
+```
+
+Trained on the `dogbehaviour` captions it reaches perplexity 1.04 and 100%
+exact-match caption generation:
+
+```
+chewing          -> "Dog bites rope."
+eating_drinking  -> "Dog is eating."
+eliminating      -> "Dog is pooping."
+playing          -> "Dog is playing."
+yawning          -> "Dog is yawning."
+```
+
+**That 100% is not impressive and should not be read as such.** The dataset
+contains exactly five distinct caption strings, one per class, so the narrator's
+task is a five-way lookup from a behaviour vector it is handed — barely harder than
+the classifier feeding it. It is reported here because the honest number is more
+useful than a flattering one.
+
+What that result does establish is that the plumbing is correct: conditioning,
+teacher forcing, generation, save/load and the audio/video feature composition all
+work end to end. The architecture is built for richer supervision — give it captions
+that vary in intensity, sequence or context and the same model learns to produce
+them. Until such captions exist, `dogsai translate` is the better tool: rule-based,
+but it composes both channels with explicit provenance for every line, which a
+five-caption language model cannot.
+
 ## GPU training
 
 ```bash
-python scripts/vast_train.py offers                      # prices, spends nothing
-python scripts/vast_train.py launch --preset base --yes   # spends money
-python scripts/vast_train.py status
-python scripts/vast_train.py fetch-run
-python scripts/vast_train.py destroy --yes                # stops billing
+python scripts/vast_train.py whoami                       # verify key, show credit
+python scripts/vast_train.py offers                       # prices, spends nothing
+python scripts/vast_train.py launch --preset small --yes   # spends money
+python scripts/vast_train.py logs                         # progress, via the API
+python scripts/vast_train.py instances                    # what is billing
+python scripts/vast_train.py destroy --yes                # stop billing
 ```
+
+Logs are read through Vast's API rather than SSH, because SSH egress is blocked in
+plenty of environments (sandboxes, CI runners, locked-down networks) and without it
+there is no way to see whether a run is progressing.
+
+### One prerequisite, and it needs a decision
+
+The rented instance has to get the code from somewhere, and there are only three
+routes:
+
+| route | status |
+|-------|--------|
+| clone from GitHub | needs the repo to be **public** — it is currently private |
+| embed the source in the boot script | **impossible**: Vast caps the boot script at 16384 bytes; the package is 128 KB base64, and 36 KB even stripped of docstrings and gzipped |
+| upload over SSH | **blocked** in any environment without SSH egress |
+
+So GPU training needs one of: making the repo public (then `--clone` works and
+nothing else changes), a read-only deploy token, or running the launcher from a
+machine that has SSH out. Publishing a private repo is not a decision a script
+should make for you, which is why the launcher will not do it silently.
+
+Everything else on that path is verified working: the API key authenticates,
+credit and pricing read correctly, and offers are available from about
+$0.03/hr interruptible — a three-hour run of the `small` preset costs well under a
+dollar.
 
 The instance downloads the dataset itself from HuggingFace rather than waiting on
 an upload. Nothing is created without `--yes`. The API key comes from

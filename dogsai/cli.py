@@ -442,6 +442,79 @@ def cmd_feeling(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_train_narrator(args: argparse.Namespace) -> int:
+    from .dataset import discover_split
+    from .narrate import (
+        NarratorConfig,
+        NarratorTrainConfig,
+        WordTokenizer,
+        build_examples,
+        condition_dim,
+        narrate,
+        save_narrator,
+        train_narrator,
+    )
+
+    root = Path(args.data_root)
+    behaviours = [n.strip() for n in Path(args.behaviours).read_text().split() if n.strip()]
+    print(f"behaviours: {', '.join(behaviours)}")
+
+    splits = {}
+    for name in ("train", "val"):
+        try:
+            splits[name] = discover_split(root, name)
+        except FileNotFoundError:
+            pass
+    if "train" not in splits:
+        print("no train split found", file=sys.stderr)
+        return 1
+
+    print("featurising clips (behaviour + audio -> conditioning vector) ...")
+    examples = {
+        name: build_examples(anns, behaviours, with_audio=not args.no_audio, verbose=True)
+        for name, anns in splits.items()
+    }
+    captions = [e.caption for group in examples.values() for e in group]
+    unique = sorted(set(captions))
+    tokenizer = WordTokenizer.build(captions)
+    print(f"\n{len(captions)} captions, {len(unique)} distinct, vocab {len(tokenizer)}")
+    if len(unique) <= 8:
+        print(
+            f"  note: only {len(unique)} distinct captions exist in this dataset, so the\n"
+            f"  narrator can do little more than restate the classifier. That is a data\n"
+            f"  limit, not a model limit — see the module docstring."
+        )
+
+    model_config = NarratorConfig(
+        vocab_size=len(tokenizer),
+        condition_dim=condition_dim(len(behaviours)),
+        dim=args.dim, depth=args.depth, heads=args.heads,
+    )
+    train_config = NarratorTrainConfig(
+        epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, out_dir=args.out_dir
+    )
+    print(f"\nDogNarrator: dim={args.dim} depth={args.depth} heads={args.heads}")
+    model, result = train_narrator(
+        examples["train"], examples.get("val", []), tokenizer,
+        model_config, train_config, device=args.device or "cpu",
+    )
+    print(f"  parameters: {model.num_parameters() / 1e6:.2f} M")
+    print(f"\nresult: {result.summary()}")
+
+    out = Path(args.out_dir) / "narrator.pt"
+    save_narrator(out, model, tokenizer, behaviours, result)
+    print(f"wrote {out}")
+
+    print("\nsamples (conditioning on each behaviour in turn):")
+    import numpy as np
+
+    for i, name in enumerate(behaviours):
+        scores = np.full(len(behaviours), 0.15 / len(behaviours), dtype=np.float32)
+        scores[i] = 0.85
+        print(f"  {name:<18} -> \"{narrate(model, tokenizer, scores, None, 7.0)}\"")
+    return 0
+
+
 def cmd_translate(args: argparse.Namespace) -> int:
     from .predict import BehaviourPredictor
 
@@ -665,6 +738,24 @@ def build_parser() -> argparse.ArgumentParser:
     feeling.add_argument("--device", default=None)
     feeling.add_argument("--json", default=None)
     feeling.set_defaults(func=cmd_feeling)
+
+    narrator = subparsers.add_parser(
+        "train-narrator",
+        help="train the text model that describes a clip in a sentence",
+    )
+    narrator.add_argument("--data-root", required=True)
+    narrator.add_argument("--behaviours", required=True)
+    narrator.add_argument("--out-dir", default="runs/narrator")
+    narrator.add_argument("--epochs", type=int, default=60)
+    narrator.add_argument("--batch-size", type=int, default=32)
+    narrator.add_argument("--lr", type=float, default=3e-4)
+    narrator.add_argument("--dim", type=int, default=128)
+    narrator.add_argument("--depth", type=int, default=3)
+    narrator.add_argument("--heads", type=int, default=4)
+    narrator.add_argument("--no-audio", action="store_true",
+                          help="skip audio featurisation (much faster, less informed)")
+    narrator.add_argument("--device", default=None)
+    narrator.set_defaults(func=cmd_train_narrator)
 
     translate = subparsers.add_parser(
         "translate",

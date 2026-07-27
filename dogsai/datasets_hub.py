@@ -207,7 +207,12 @@ def convert_dogbehaviour(
                 end=end,
                 group=video.stem,
                 meta={"source": "fishchen/dog-behavior-dataset",
-                      "raw_labels": raw_labels},
+                      "raw_labels": raw_labels,
+                      # Kept for dogsai.narrate: the free-text caption is the
+                      # only natural-language supervision this dataset carries.
+                      "caption": " ".join(
+                          str(c.get("text", "")).strip() for c in captions
+                      ).strip()},
             )
         )
     return out

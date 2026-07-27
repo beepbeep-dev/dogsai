@@ -65,3 +65,22 @@ To do better, the highest-leverage move is not a bigger model — it is annotati
 your own footage. `dogsai prepare --format label-studio` and
 `dogsai train --resume models/dogbehaviour-nano.pt --resume-weights-only` will
 fine-tune this checkpoint onto your data.
+
+## `dogbehaviour-narrator.pt`
+
+`DogNarrator` — a 0.74 M parameter Transformer decoder that turns the detection
+vector (behaviour distribution + audio summary + duration) into a sentence.
+
+```python
+from dogsai.narrate import load_narrator, narrate
+model, tokenizer, behaviours, metrics = load_narrator("models/dogbehaviour-narrator.pt")
+```
+
+Validation perplexity 1.04, exact-match caption generation 100%.
+
+**Read that 100% with suspicion.** The training corpus has five distinct caption
+strings, one per behaviour, so the task reduces to a five-way lookup from a vector
+the model is handed. The number says the pipeline works; it says almost nothing
+about the model's language ability. It is included because a real trained
+generative model with an honest limitation is more useful than a flattering
+benchmark.
