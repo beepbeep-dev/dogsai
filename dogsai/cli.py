@@ -442,6 +442,38 @@ def cmd_feeling(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_make_captions(args: argparse.Namespace) -> int:
+    from .caption_gen import corpus_stats, generate_captions, save_corpus
+    from .dataset import discover_split
+
+    root = Path(args.data_root)
+    out_root = Path(args.out) if args.out else root / "captions"
+    out_root.mkdir(parents=True, exist_ok=True)
+    for split in args.splits:
+        try:
+            annotations = discover_split(root, split)
+        except FileNotFoundError:
+            print(f"skipping {split}: not found")
+            continue
+        print(f"\n{split}: measuring {len(annotations)} clips ...")
+        captions = generate_captions(annotations, with_audio=not args.no_audio)
+        path = save_corpus(out_root / f"{split}_captions.jsonl", captions)
+        stats = corpus_stats(captions)
+        print(f"  wrote {path}")
+        print(f"  {stats['captions']} captions, {stats['distinct']} distinct "
+              f"({stats['distinct_ratio']:.0%}), vocab {stats['vocabulary']}, "
+              f"{stats['mean_words']:.1f} words avg "
+              f"({stats['min_words']}-{stats['max_words']})")
+        for item in captions[:3]:
+            print(f'    e.g. "{item.caption}"')
+    print("\nthese captions are GENERATED from detector output, not human "
+          "annotation — see dogsai/caption_gen.py for what that does and does not "
+          "teach the narrator.")
+    print(f"\nnow: dogsai train-narrator --data-root {args.data_root} "
+          f"--behaviours {args.data_root}/behaviours.txt --captions {out_root}")
+    return 0
+
+
 def cmd_train_narrator(args: argparse.Namespace) -> int:
     from .dataset import discover_split
     from .narrate import (
@@ -469,11 +501,28 @@ def cmd_train_narrator(args: argparse.Namespace) -> int:
         print("no train split found", file=sys.stderr)
         return 1
 
-    print("featurising clips (behaviour + audio -> conditioning vector) ...")
-    examples = {
-        name: build_examples(anns, behaviours, with_audio=not args.no_audio, verbose=True)
-        for name, anns in splits.items()
-    }
+    if args.captions:
+        from .caption_gen import corpus_stats, corpus_to_examples, load_corpus
+
+        corpus_root = Path(args.captions)
+        examples = {}
+        for name in splits:
+            path = corpus_root / f"{name}_captions.jsonl"
+            if not path.exists():
+                print(f"no caption corpus for {name} at {path}", file=sys.stderr)
+                return 1
+            corpus = load_corpus(path)
+            stats = corpus_stats(corpus)
+            print(f"{name}: {stats['captions']} generated captions, "
+                  f"{stats['distinct']} distinct ({stats['distinct_ratio']:.0%}), "
+                  f"vocab {stats['vocabulary']}")
+            examples[name] = corpus_to_examples(corpus, behaviours)
+    else:
+        print("featurising clips (behaviour + audio -> conditioning vector) ...")
+        examples = {
+            name: build_examples(anns, behaviours, with_audio=not args.no_audio, verbose=True)
+            for name, anns in splits.items()
+        }
     captions = [e.caption for group in examples.values() for e in group]
     unique = sorted(set(captions))
     tokenizer = WordTokenizer.build(captions)
@@ -488,7 +537,7 @@ def cmd_train_narrator(args: argparse.Namespace) -> int:
     model_config = NarratorConfig(
         vocab_size=len(tokenizer),
         condition_dim=condition_dim(len(behaviours)),
-        dim=args.dim, depth=args.depth, heads=args.heads,
+        dim=args.dim, depth=args.depth, heads=args.heads, max_len=args.max_len,
     )
     train_config = NarratorTrainConfig(
         epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, out_dir=args.out_dir
@@ -739,6 +788,17 @@ def build_parser() -> argparse.ArgumentParser:
     feeling.add_argument("--json", default=None)
     feeling.set_defaults(func=cmd_feeling)
 
+    captions = subparsers.add_parser(
+        "make-captions",
+        help="build a varied caption corpus by measuring real clips",
+    )
+    captions.add_argument("--data-root", required=True)
+    captions.add_argument("--out", default=None,
+                          help="defaults to <data-root>/captions")
+    captions.add_argument("--splits", nargs="+", default=["train", "val"])
+    captions.add_argument("--no-audio", action="store_true")
+    captions.set_defaults(func=cmd_make_captions)
+
     narrator = subparsers.add_parser(
         "train-narrator",
         help="train the text model that describes a clip in a sentence",
@@ -752,6 +812,10 @@ def build_parser() -> argparse.ArgumentParser:
     narrator.add_argument("--dim", type=int, default=128)
     narrator.add_argument("--depth", type=int, default=3)
     narrator.add_argument("--heads", type=int, default=4)
+    narrator.add_argument("--captions", default=None, metavar="DIR",
+                          help="use a generated caption corpus from `dogsai make-captions` "
+                               "instead of the dataset's own captions")
+    narrator.add_argument("--max-len", type=int, default=48)
     narrator.add_argument("--no-audio", action="store_true",
                           help="skip audio featurisation (much faster, less informed)")
     narrator.add_argument("--device", default=None)

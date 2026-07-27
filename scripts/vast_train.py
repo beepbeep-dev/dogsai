@@ -61,9 +61,20 @@ __FETCH_SOURCE__
 cd /root/dogsai
 python3 -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
 
-# Fetch + convert the dataset (resumable; skips what is already there).
-python3 -m dogsai.cli fetch "__DATASET__" \
-  --raw-root /root/data/raw --out /root/data/prepared --workers 16
+# Fetch + convert the dataset. Retried with backoff and with modest parallelism:
+# unauthenticated HuggingFace downloads get 429-rate-limited at 16 workers, and
+# because this script runs under `set -e` a single 429 killed the whole run.
+# snapshot_download is resumable, so each retry continues rather than restarting.
+for attempt in 1 2 3 4 5 6 7 8; do
+  if python3 -m dogsai.cli fetch "__DATASET__" \
+       --raw-root /root/data/raw --out /root/data/prepared --workers 4; then
+    echo "dataset ready after attempt $attempt"
+    break
+  fi
+  echo "fetch attempt $attempt failed (likely HF rate limiting); backing off"
+  sleep $((attempt * 20))
+done
+test -s /root/data/prepared/train.jsonl || { echo "FATAL: dataset never arrived"; exit 1; }
 
 python3 -m dogsai.cli audit --data-root /root/data/prepared \
   --behaviours /root/data/prepared/behaviours.txt --no-duplicate-check || true
@@ -464,8 +475,10 @@ def build_parser() -> argparse.ArgumentParser:
     logs = subparsers.add_parser("logs", help="read the instance console log via the API")
     logs.add_argument("--tail", type=int, default=2000)
     logs.add_argument("--bytes", type=int, default=8000)
-    logs.add_argument("--wait", type=float, default=6.0)
-    logs.add_argument("--retries", type=int, default=6)
+    # S3 needs a little while to publish the log after the request; 6x6s was not
+    # enough in practice and produced a spurious "log unavailable".
+    logs.add_argument("--wait", type=float, default=10.0)
+    logs.add_argument("--retries", type=int, default=12)
     logs.set_defaults(func=cmd_logs)
 
     fetch = subparsers.add_parser("fetch-run", help="print commands to copy results back")
