@@ -53,6 +53,8 @@ echo "=== dogsai provisioning $(date -u) ==="
 
 export DEBIAN_FRONTEND=noninteractive
 export PIP_ROOT_USER_ACTION=ignore
+# Reduces allocator fragmentation; cheap insurance against a marginal OOM.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 python3 -m pip install -q --upgrade pip
 python3 -m pip install -q av opencv-python-headless huggingface_hub tqdm numpy
 
@@ -98,6 +100,7 @@ python3 -m dogsai.cli train \
   --set model.preset=__PRESET__ \
   --set train.epochs=__EPOCHS__ \
   --set train.batch_size=__BATCH__ \
+  --set train.accum_steps=__ACCUM__ \
   --set data.num_workers=__WORKERS__ \
   --set train.amp=true \
   --set train.compile=false \
@@ -327,6 +330,7 @@ def cmd_launch(args) -> int:
         .replace("__PATIENCE__", str(args.patience))
         .replace("__CACHE_FRAMES__", str(args.cache_frames))
         .replace("__CACHE_SIZE__", str(args.cache_size))
+        .replace("__ACCUM__", str(args.accum_steps))
     )
     payload = {
         "client_id": "me",
@@ -561,7 +565,11 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--dataset", default="dogbehaviour")
     launch.add_argument("--preset", default="small", choices=["nano", "small", "base"])
     launch.add_argument("--epochs", type=int, default=40)
-    launch.add_argument("--batch", type=int, default=32)
+    launch.add_argument("--batch", type=int, default=32,
+                        help="micro-batch actually placed on the GPU per step")
+    launch.add_argument("--accum-steps", type=int, default=1,
+                        help="gradient-accumulation multiplier; effective batch "
+                             "= batch * accum-steps, at a fraction of the VRAM")
     launch.add_argument("--patience", type=int, default=20,
                         help="early-stop patience, in epochs")
     launch.add_argument("--cache-frames", type=int, default=32,
