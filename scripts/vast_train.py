@@ -81,12 +81,20 @@ for attempt in 1 2 3 4 5 6 7 8; do
   # *exception* — a hung process just sits inside the `if` forever and the loop
   # never gets a second attempt. `timeout` turns "hangs forever" into "fails after
   # N seconds", which is what actually lets the retry+backoff logic below do its job.
-  if timeout 600 python3 -m dogsai.cli fetch "__DATASET__" \
-       --raw-root /root/data/raw --out /root/data/prepared --workers 4; then
+  # Three consecutive real runs hung with 4 parallel workers, regardless of GPU
+  # host, region, or the xet backend being disabled — consistent with anti-abuse
+  # throttling that kicks in on *concurrent* connections from a datacenter IP
+  # range rather than anything file- or xet-specific (checked: no file in this
+  # dataset is anomalously large). Fewer simultaneous connections is a more
+  # boring, less abuse-shaped access pattern, so this trades nominal throughput
+  # for actually finishing; the timeout is raised to match a legitimately slower
+  # but working serial-ish download rather than one that is still just hanging.
+  if timeout 1200 python3 -m dogsai.cli fetch "__DATASET__" \
+       --raw-root /root/data/raw --out /root/data/prepared --workers 2; then
     echo "dataset ready after attempt $attempt"
     break
   fi
-  echo "fetch attempt $attempt failed or timed out after 600s; backing off"
+  echo "fetch attempt $attempt failed or timed out after 1200s; backing off"
   sleep $((attempt * 20))
 done
 test -s /root/data/prepared/train.jsonl || { echo "FATAL: dataset never arrived"; exit 1; }
