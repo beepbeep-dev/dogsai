@@ -55,6 +55,12 @@ export DEBIAN_FRONTEND=noninteractive
 export PIP_ROOT_USER_ACTION=ignore
 # Reduces allocator fragmentation; cheap insurance against a marginal OOM.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# huggingface_hub's newer "xet" transfer backend is the common thread behind two
+# separate failures seen on real runs: a 429 from its token endpoint under
+# unauthenticated access, and (on a different instance/region) a download that
+# hung indefinitely after a handful of files with no error and no progress.
+# Forcing the classic HTTP/LFS path trades a little speed for actually finishing.
+export HF_HUB_DISABLE_XET=1
 python3 -m pip install -q --upgrade pip
 python3 -m pip install -q av opencv-python-headless huggingface_hub tqdm numpy
 
