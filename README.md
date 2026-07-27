@@ -241,6 +241,36 @@ was still improving when the 26-epoch budget ran out (best score was the final
 epoch), so this is a floor, not a ceiling. More epochs, the `small` or `base`
 preset, and a GPU should all move it — see [GPU training](#gpu-training).
 
+## Buffing up the main model: a self-generated multi-label dataset
+
+`dogsai fetch dogbehaviour` gives each clip exactly one label. A clip captioned
+"Dog is eating." that also barks partway through trains as pure
+`eating_drinking`, and the model never learns what a bark looks like there
+because nothing says one exists.
+
+```bash
+dogsai make-captions --data-root dogsai_data/prepared      # computes per-clip audio once
+dogsai enrich --data-root dogsai_data/prepared             # adds self-detected labels
+dogsai train --data-root dogsai_data/prepared/enriched \
+             --behaviours dogsai_data/prepared/enriched/behaviours.txt \
+             --task multilabel --set model.preset=base
+```
+
+`dogsai enrich` adds a `"barking"` label to any clip where `dogsai.audio` —
+already in this repo, already verified against real footage — confidently hears
+one. Run on the real 1217-clip set: **391/973 train clips and 104/244 val clips**
+gained the label. This is a strict enrichment: it only ever *adds* the label, it
+never removes or second-guesses the original human-authored one, and it inherits
+whatever error rate the audio detector has (documented in `dogsai/audio.py`). It
+is not new external annotation — it is a detector already in this repository,
+pointed at video already on disk, producing labels the original single-label
+captions could not represent.
+
+Combined with the `base` preset (6.39M params, up from `nano`'s 0.87M) and full
+convergence on a GPU, this is the main lever for making the shipped classifier
+more accurate — see [GPU training](#gpu-training) for the run that produced it,
+and `models/README.md` for the resulting numbers.
+
 ## Data
 
 ```bash
@@ -511,10 +541,12 @@ their values is a real skill — but it is distillation, not new knowledge.
 ## GPU training
 
 ```bash
-python scripts/vast_train.py whoami                        # verify key, show credit
-python scripts/vast_train.py offers                        # prices, spends nothing
-python scripts/vast_train.py launch --clone --preset small --yes   # spends money
-python scripts/vast_train.py logs                          # progress, via the API
+python scripts/vast_train.py whoami                       # verify key, show credit
+python scripts/vast_train.py offers                       # prices, spends nothing
+python scripts/vast_train.py launch --clone --preset base \
+    --epochs 100 --patience 20 --cache-frames 32 --cache-size 224 --yes  # spends money
+python scripts/vast_train.py logs                         # progress, via the API
+python scripts/vast_train.py fetch-artifact                # download the trained model, over HTTPS
 python scripts/vast_train.py instances                     # what is billing
 python scripts/vast_train.py destroy --yes                 # stop billing
 ```
@@ -523,30 +555,30 @@ Logs are read through Vast's API rather than SSH, because SSH egress is blocked 
 plenty of environments (sandboxes, CI runners, locked-down networks) and without it
 there is no way to see whether a run is progressing.
 
-### Verified end to end
+### Getting the trained model back without SSH
 
-The repo is public, so `--clone` works. One real run: RTX A4000, interruptible,
-`small` preset, 60 epochs, real dataset fetched on the instance —
-**mAP 0.633, macro F1 0.628** on the held-out split, a clear step up from the CPU
-`nano` run. Total cost **$0.05** (1.3 hours at $0.031-0.04/hr including the
-provisioning time). No SSH needed: logs are read through Vast's API.
+The first verified run (RTX A4000, `small` preset, 60 epochs) reached
+**mAP 0.633** — and the checkpoint was stranded on the instance. `request_logs`
+only tails console output, not arbitrary files, and SSH/scp — the normal way to
+pull a `runs/` directory home — was blocked from that environment.
 
-One limitation worth naming honestly: **this sandbox cannot retrieve the trained
-checkpoint back off the instance.** `request_logs` only tails the running
-container's console output, not arbitrary files, and SSH/scp — the normal way to
-pull a `runs/` directory home — is blocked from here. If you run the launcher from
-a machine with SSH egress, `fetch-run` prints the exact `scp` command and this is
-a non-issue. From an SSH-blocked environment, the practical fix is to add a step to
-`ONSTART` that uploads the checkpoint somewhere reachable over HTTPS (an HF Hub
-repo you control, an S3 bucket, a webhook) — deliberately left as a manual step
-here rather than picking a destination and shipping credentials for it on your
-behalf.
+The fix: `onstart` now bundles `best.pt` + its config/history/metrics, uploads the
+bundle to a public anonymous HTTPS host (`0x0.st`, falling back to
+`litterbox.catbox.moe`) once training finishes, and prints the URL. `fetch-artifact`
+reads that URL back out of the console log (the same `request_logs` API already
+used for progress) and downloads it with a plain HTTPS `GET`. No SSH anywhere in
+the loop — it only needs what this environment already has.
+
+If you're running the launcher somewhere with real SSH egress, `fetch-run` prints
+the direct `scp` command instead, which is simpler when it's available.
 
 The instance downloads the dataset itself from HuggingFace rather than waiting on
-an upload. Nothing is created without `--yes`. The API key comes from
-`$VAST_API_KEY` or `~/.vast_api_key`, both outside the repo — credentials do not
-belong in version control, and a key pasted into a chat or a commit should be
-rotated.
+an upload, and now also runs `dogsai make-captions` + `dogsai enrich` before
+training so it learns from the richer multi-label set (see
+[Buffing up the main model](#buffing-up-the-main-model-a-self-generated-multi-label-dataset)).
+Nothing is created without `--yes`. The API key comes from `$VAST_API_KEY` or
+`~/.vast_api_key`, both outside the repo — credentials do not belong in version
+control, and a key pasted into a chat or a commit should be rotated.
 
 ## Synthetic data
 
