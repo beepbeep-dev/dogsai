@@ -258,18 +258,40 @@ dogsai train --data-root dogsai_data/prepared/enriched \
 
 `dogsai enrich` adds a `"barking"` label to any clip where `dogsai.audio` —
 already in this repo, already verified against real footage — confidently hears
-one. Run on the real 1217-clip set: **391/973 train clips and 104/244 val clips**
-gained the label. This is a strict enrichment: it only ever *adds* the label, it
-never removes or second-guesses the original human-authored one, and it inherits
-whatever error rate the audio detector has (documented in `dogsai/audio.py`). It
-is not new external annotation — it is a detector already in this repository,
-pointed at video already on disk, producing labels the original single-label
-captions could not represent.
+one. Run on the deduplicated 1217-clip set (see below): **398/971 train clips
+and 97/246 val clips** gained the label. This is a strict enrichment: it only
+ever *adds* the label, it never removes or second-guesses the original
+human-authored one, and it inherits whatever error rate the audio detector has
+(documented in `dogsai/audio.py`). It is not new external annotation — it is a
+detector already in this repository, pointed at video already on disk,
+producing labels the original single-label captions could not represent.
 
 Combined with the `base` preset (6.39M params, up from `nano`'s 0.87M) and full
 convergence on a GPU, this is the main lever for making the shipped classifier
-more accurate — see [GPU training](#gpu-training) for the run that produced it,
-and `models/README.md` for the resulting numbers.
+more accurate: **mAP 0.8648** on 246 held-out clips, up from `nano`'s 0.691 —
+see [GPU training](#gpu-training) for the run, and `models/README.md` for the
+full breakdown.
+
+### A real leakage bug this run caught
+
+`fishchen/dog-behavior-dataset` groups clips by filename, but auditing the
+first split found 21 pairs of differently-named clips — 18 of them
+pixel-identical — split across train and val: the same footage saved twice
+under a different name. That means the `nano` numbers above were measured
+against a validation set that wasn't fully disjoint from training.
+
+`dogsai.audit.merge_duplicate_groups` fixes this with a perceptual-hash
+(dHash) union-find pass over one representative clip per group, merging any
+group within Hamming distance 6 of another so every copy of the same footage
+lands on the same side of the split. It's on by default in
+`datasets_hub.prepare` (`--dedupe` to control it), and it's why the counts
+above read 971/246 rather than 973/244 — 64 duplicate groups merged. Verify
+any prepared dataset is clean with (duplicate checking is on by default; pass
+`--no-duplicate-check` to skip it):
+
+```bash
+dogsai audit --data-root dogsai_data/prepared
+```
 
 ## Data
 
@@ -571,6 +593,20 @@ the loop — it only needs what this environment already has.
 
 If you're running the launcher somewhere with real SSH egress, `fetch-run` prints
 the direct `scp` command instead, which is simpler when it's available.
+
+That fallback isn't bulletproof: on the `base`-preset run that produced
+`models/dogbehaviour-base.pt` (see `models/README.md`), this specific
+instance's outbound connections to both `0x0.st` and `litterbox.catbox.moe`
+hung well past their own `curl -m` timeouts — a host-level issue, not a code
+bug, since the same script had worked minutes earlier on a different instance.
+With no SSH and no working anonymous-host upload, the checkpoint was pulled
+out through Vast's own Cloud Sync feature instead — it's a plain REST endpoint
+(`POST /commands/rclone/`, discoverable via `GET /users/cloud_integrations/`
+for the connection id) that copies instance files straight to a configured
+cloud destination (Google Drive, S3, Backblaze, Dropbox), with no SSH
+involved on either end. `scripts/vast_train.py` doesn't wrap this yet — it was
+driven by hand against the Vast API for this run — but it's the answer if
+`fetch-artifact` ever stalls the same way.
 
 The instance downloads the dataset itself from HuggingFace rather than waiting on
 an upload, and now also runs `dogsai make-captions` + `dogsai enrich` before

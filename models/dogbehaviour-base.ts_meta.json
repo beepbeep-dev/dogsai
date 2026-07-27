@@ -1,0 +1,39 @@
+{
+  "behaviours": [
+    "barking",
+    "chewing",
+    "eating_drinking",
+    "eliminating",
+    "playing",
+    "yawning"
+  ],
+  "task": "multilabel",
+  "input": {
+    "layout": "NCTHW",
+    "clip_frames": 24,
+    "image_size": 192,
+    "frame_stride": 2,
+    "normalisation": {
+      "mean": [
+        0.485,
+        0.456,
+        0.406
+      ],
+      "std": [
+        0.229,
+        0.224,
+        0.225
+      ]
+    }
+  },
+  "thresholds": [
+    0.3999325,
+    0.55708,
+    0.48956449999999996,
+    0.5509360000000001,
+    0.5979570000000001,
+    0.6686315
+  ],
+  "activation": "sigmoid",
+  "trained_epochs": 100
+}
