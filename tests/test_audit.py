@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -212,3 +214,85 @@ class TestCrossSplitLeakage:
             duplicate_distance=6,
         )
         assert any(f.code == "cross_split_duplicate" for f in cross)
+
+
+class TestMergeDuplicateGroups:
+    def _copy_video(self, source: Path, dest: Path) -> Path:
+        dest.write_bytes(Path(source).read_bytes())
+        return dest
+
+    def test_content_duplicates_under_different_names_are_merged(self, mini_dataset, tmp_path):
+        """The exact failure the fishchen dataset audit found: same footage, two names."""
+        from dogsai.audit import merge_duplicate_groups
+
+        original = discover_split(mini_dataset, "train")[0]
+        copy_path = self._copy_video(Path(original.video), tmp_path / "renamed_copy.mp4")
+        sneaky = Annotation(
+            str(copy_path), list(original.labels), original.start, original.end,
+            group="totally_different_name",
+        )
+        merged, count = merge_duplicate_groups([original, sneaky], max_distance=6)
+        assert count == 1
+        assert merged[0].group == merged[1].group
+
+    def test_unrelated_clips_are_left_ungrouped(self, mini_dataset):
+        from dogsai.audit import merge_duplicate_groups
+
+        annotations = discover_split(mini_dataset, "train")[:3]
+        merged, count = merge_duplicate_groups(annotations, max_distance=6)
+        assert count == 0
+        # every annotation still has its own group_key as its explicit group
+        for original, result in zip(annotations, merged):
+            assert result.group == original.group_key
+
+    def test_merging_prevents_a_leaky_split(self, mini_dataset, tmp_path):
+        """The whole point: after merging, make_splits cannot separate the pair."""
+        from dogsai.audit import merge_duplicate_groups
+        from dogsai.dataset import make_splits
+
+        original = discover_split(mini_dataset, "train")[0]
+        copy_path = self._copy_video(Path(original.video), tmp_path / "copy2.mp4")
+        sneaky = Annotation(
+            str(copy_path), list(original.labels), original.start, original.end,
+            group="a_completely_different_group_name",
+        )
+        others = discover_split(mini_dataset, "train")[1:] + discover_split(mini_dataset, "val")
+        merged, _ = merge_duplicate_groups([original, sneaky] + others, max_distance=6)
+        parts = make_splits(merged, {"train": 0.7, "val": 0.3}, seed=1)
+        train_videos = {a.video for a in parts.get("train", [])}
+        val_videos = {a.video for a in parts.get("val", [])}
+        # both copies together, never split
+        assert not ({original.video, str(copy_path)} & train_videos
+                   and {original.video, str(copy_path)} & val_videos)
+
+    def test_single_group_is_a_no_op(self, mini_dataset):
+        from dogsai.audit import merge_duplicate_groups
+
+        annotations = discover_split(mini_dataset, "train")[:1]
+        merged, count = merge_duplicate_groups(annotations, max_distance=6)
+        assert count == 0
+        assert merged[0].group == annotations[0].group_key
+
+    def test_unreadable_video_does_not_crash_the_merge(self, mini_dataset):
+        from dogsai.audit import merge_duplicate_groups
+
+        annotations = discover_split(mini_dataset, "train")[:2]
+        annotations.append(Annotation("/nope/missing.mp4", ["running"], group="broken"))
+        merged, _ = merge_duplicate_groups(annotations, max_distance=6)
+        assert len(merged) == 3
+
+    def test_merge_is_deterministic_regardless_of_input_order(self, mini_dataset, tmp_path):
+        from dogsai.audit import merge_duplicate_groups
+
+        original = discover_split(mini_dataset, "train")[0]
+        copy_path = self._copy_video(Path(original.video), tmp_path / "copy3.mp4")
+        sneaky = Annotation(
+            str(copy_path), list(original.labels), original.start, original.end,
+            group="zzz_another_name",
+        )
+        forward, _ = merge_duplicate_groups([original, sneaky], max_distance=6)
+        backward, _ = merge_duplicate_groups([sneaky, original], max_distance=6)
+        assert forward[0].group == forward[1].group
+        assert backward[0].group == backward[1].group
+        # same canonical name either way
+        assert {forward[0].group} == {backward[0].group}

@@ -230,8 +230,22 @@ def prepare(
     fractions: dict[str, float] | None = None,
     seed: int = 0,
     relative: bool = True,
+    dedupe: bool = True,
+    dedupe_distance: int = 6,
+    verbose: bool = True,
 ) -> dict[str, Path]:
-    """Convert a downloaded dataset into ``train.jsonl`` / ``val.jsonl`` splits."""
+    """Convert a downloaded dataset into ``train.jsonl`` / ``val.jsonl`` splits.
+
+    ``dedupe`` runs :func:`dogsai.audit.merge_duplicate_groups` before splitting,
+    which matters here specifically: `dogbehaviour`'s clips are grouped by
+    filename, and auditing the first split found 21 pairs of differently-named
+    clips (18 of them pixel-identical) split across train and val — the same
+    footage saved twice under a different name. Deduplication finds those by
+    content and forces every copy onto the same side of the split, so a reported
+    validation score is not partly measuring memorised training clips. Leave this
+    on unless you have already deduplicated upstream; it is a one-time decode of
+    one representative clip per group, not per annotation.
+    """
     if key not in CONVERTERS:
         raise KeyError(
             f"no converter for {key!r}; available: {', '.join(CONVERTERS)}"
@@ -239,6 +253,21 @@ def prepare(
     annotations = CONVERTERS[key](raw_root)
     if not annotations:
         raise ValueError(f"converted zero annotations from {raw_root}")
+
+    if dedupe:
+        from .audit import merge_duplicate_groups
+
+        annotations, merged = merge_duplicate_groups(
+            annotations, max_distance=dedupe_distance,
+            cache_path=Path(raw_root) / ".dogsai_meta.json",
+        )
+        if verbose:
+            print(
+                f"deduplicated groups: merged {merged} near-duplicate group(s) "
+                f"so they cannot land on both sides of the split"
+                if merged
+                else "deduplicated groups: no cross-group duplicates found"
+            )
 
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)

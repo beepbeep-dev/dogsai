@@ -200,6 +200,91 @@ def find_near_duplicates(
     return out
 
 
+def merge_duplicate_groups(
+    annotations: Sequence[Annotation],
+    max_distance: int = 6,
+    cache_path: str | Path | None = None,
+    verbose: bool = False,
+) -> tuple[list[Annotation], int]:
+    """Union-find over content, so near-duplicate clips can never split apart.
+
+    Grouping by filename (the default `group_key`) misses the single most common
+    way real-world video datasets leak into their own validation set: the same
+    footage saved twice under different names — a re-upload, a re-encode, a clip
+    trimmed a few frames differently. `dogsai fetch dogbehaviour` found exactly
+    this: 21 pairs of differently-named clips, 18 of them pixel-identical,
+    landing on opposite sides of a per-filename split.
+
+    Call this **before** :func:`~dogsai.dataset.make_splits`, on the full
+    annotation set, not per-split — merging within an already-split set cannot
+    undo the leakage, it can only detect it. One perceptual signature is computed
+    per existing group (not per annotation — clips already sharing a group don't
+    need deduplication against each other), near-duplicate groups are unioned, and
+    every annotation in a merged component is reassigned to one canonical group
+    name, chosen deterministically (the lexicographically smallest member) so
+    reruns are reproducible.
+
+    Returns the annotations with `.group` set explicitly, and the number of
+    groups that were merged into another (0 means no cross-group duplicates were
+    found — the common case once this has been applied once upstream).
+    """
+    by_group: dict[str, list[Annotation]] = defaultdict(list)
+    for annotation in annotations:
+        by_group[annotation.group_key].append(annotation)
+    keys = list(by_group)
+    if len(keys) < 2:
+        for annotation in annotations:
+            annotation.group = annotation.group_key
+        return list(annotations), 0
+
+    cache = MetaCache(cache_path)
+    signatures: dict[str, np.ndarray] = {}
+    for key in keys:
+        representative = by_group[key][0]
+        try:
+            meta = cache.get(representative.video)
+            signatures[key] = clip_signature(
+                representative.video, meta,
+                start=representative.start, end=representative.end,
+            )
+        except Exception:
+            continue  # unreadable video: audit_annotations reports it separately
+    cache.flush()
+
+    parent = {key: key for key in keys}
+
+    def find(key: str) -> str:
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            # Deterministic winner regardless of pair order, so reruns agree.
+            lo, hi = sorted((ra, rb))
+            parent[hi] = lo
+
+    for a, b, _distance in find_near_duplicates(signatures, max_distance):
+        union(a, b)
+
+    components: dict[str, list[str]] = defaultdict(list)
+    for key in keys:
+        components[find(key)].append(key)
+    merged_groups = 0
+    for canonical, members in components.items():
+        if len(members) > 1:
+            merged_groups += len(members) - 1
+            if verbose:
+                print(f"  merged groups {sorted(members)} -> {canonical!r}")
+        for member in members:
+            for annotation in by_group[member]:
+                annotation.group = canonical
+
+    return list(annotations), merged_groups
+
+
 # ---------------------------------------------------------------------------
 # the audit
 # ---------------------------------------------------------------------------
