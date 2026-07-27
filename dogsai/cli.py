@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
+
 from .config import Config
 from .labels import DEFAULT_BEHAVIOURS, LabelSpace
 
@@ -442,6 +444,92 @@ def cmd_feeling(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_train_chat(args: argparse.Namespace) -> int:
+    from .chat import (
+        ChatConfig,
+        build_tokenizer,
+        dialogue_stats,
+        generate_dialogues,
+        save_chat,
+        state_dim,
+        train_chat,
+    )
+
+    behaviours = [n.strip() for n in Path(args.behaviours).read_text().split() if n.strip()]
+    print(f"behaviours: {', '.join(behaviours)}")
+    print("\nbuilding the dialogue dataset (state x intent grid) ...")
+    examples = generate_dialogues(behaviours, repeats=args.repeats)
+    stats = dialogue_stats(examples)
+    print(f"  {stats['pairs']} pairs, {stats['distinct_answers']} distinct answers, "
+          f"{stats['distinct_questions']} distinct questions, "
+          f"vocab {stats['vocabulary']}, {stats['intents']} intents")
+    print("  NOTE: the knowledge in these answers is encoded by hand from "
+          "conventional\n  dog-behaviour guidance, not learned from data. The model "
+          "learns the mapping\n  and the phrasing — see dogsai/chat.py.")
+
+    rng = np.random.default_rng(0)
+    order = rng.permutation(len(examples))
+    cut = int(len(examples) * 0.9)
+    train = [examples[i] for i in order[:cut]]
+    val = [examples[i] for i in order[cut:]]
+    tokenizer = build_tokenizer(examples)
+
+    config = ChatConfig(
+        vocab_size=len(tokenizer), state_dim=state_dim(len(behaviours)),
+        dim=args.dim, depth=args.depth, heads=args.heads,
+    )
+    print(f"\nDogChat: dim={args.dim} depth={args.depth} heads={args.heads}")
+    model, result = train_chat(
+        train, val, tokenizer, behaviours, config,
+        epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
+        device=args.device or "cpu",
+    )
+    print(f"  parameters: {model.num_parameters() / 1e6:.2f} M")
+    print(f"\nresult: {result.summary()}")
+
+    out = Path(args.out_dir) / "chat.pt"
+    save_chat(out, model, tokenizer, behaviours, result)
+    print(f"wrote {out}")
+    return 0
+
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    from .chat import ask, load_chat, state_from_prediction
+    from .predict import BehaviourPredictor
+
+    model, tokenizer, behaviours, metrics = load_chat(args.chat_model, device=args.device or "cpu")
+    predictor = BehaviourPredictor(args.checkpoint, device=args.device)
+    prediction = predictor.predict(args.video)
+    state = state_from_prediction(prediction)
+
+    print(f"=== {args.video}  ({prediction.meta.duration:.1f}s)\n")
+    print(prediction.timeline())
+    print(f"\nstate the chat model is conditioned on:")
+    print(f"  behaviour {state.behaviour}   voice {state.voice or '(silent)'}   "
+          f"arousal {state.arousal:.2f}   valence {state.valence:+.2f}\n")
+
+    questions = args.ask or [
+        "how are you feeling", "what do you want", "are you hurt",
+        "why are you making noise", "how should i approach you",
+        "should i be worried",
+    ]
+    for question in questions:
+        print(ask(model, tokenizer, behaviours, state, question).render())
+        print()
+
+    if args.interactive:
+        print("type a question, or 'quit':")
+        while True:
+            try:
+                line = input("> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if not line or line.lower() in ("quit", "exit"):
+                break
+            print(ask(model, tokenizer, behaviours, state, line).render())
+    return 0
+
+
 def cmd_make_captions(args: argparse.Namespace) -> int:
     from .caption_gen import corpus_stats, generate_captions, save_corpus
     from .dataset import discover_split
@@ -561,6 +649,16 @@ def cmd_train_narrator(args: argparse.Namespace) -> int:
         scores = np.full(len(behaviours), 0.15 / len(behaviours), dtype=np.float32)
         scores[i] = 0.85
         print(f"  {name:<18} -> \"{narrate(model, tokenizer, scores, None, 7.0)}\"")
+
+    print("\nsame behaviour, with a vocalisation added:")
+    scores = np.full(len(behaviours), 0.15 / len(behaviours), dtype=np.float32)
+    scores[0] = 0.85
+    for kind, arousal, valence in (("growl", 0.7, -0.6), ("bark_excited", 0.8, 0.6),
+                                   ("whine", 0.5, -0.3)):
+        summary = {"kinds": {kind: 1}, "arousal": arousal, "valence": valence,
+                  "vocal_fraction": 0.3}
+        print(f"  {behaviours[0]} + {kind:<14} -> "
+              f"\"{narrate(model, tokenizer, scores, summary, 7.0)}\"")
     return 0
 
 
@@ -787,6 +885,32 @@ def build_parser() -> argparse.ArgumentParser:
     feeling.add_argument("--device", default=None)
     feeling.add_argument("--json", default=None)
     feeling.set_defaults(func=cmd_feeling)
+
+    chat_train = subparsers.add_parser(
+        "train-chat", help="train the conversational model you can ask questions"
+    )
+    chat_train.add_argument("--behaviours", required=True)
+    chat_train.add_argument("--out-dir", default="runs/chat")
+    chat_train.add_argument("--epochs", type=int, default=12)
+    chat_train.add_argument("--batch-size", type=int, default=64)
+    chat_train.add_argument("--lr", type=float, default=6e-4)
+    chat_train.add_argument("--dim", type=int, default=192)
+    chat_train.add_argument("--depth", type=int, default=4)
+    chat_train.add_argument("--heads", type=int, default=6)
+    chat_train.add_argument("--repeats", type=int, default=2)
+    chat_train.add_argument("--device", default=None)
+    chat_train.set_defaults(func=cmd_train_chat)
+
+    chat = subparsers.add_parser(
+        "chat", help="ask questions about a video and get answers"
+    )
+    chat.add_argument("checkpoint", help="the behaviour model")
+    chat.add_argument("chat_model", help="the trained chat model")
+    chat.add_argument("video")
+    chat.add_argument("--ask", nargs="+", default=None, help="questions to ask")
+    chat.add_argument("--interactive", action="store_true")
+    chat.add_argument("--device", default=None)
+    chat.set_defaults(func=cmd_chat)
 
     captions = subparsers.add_parser(
         "make-captions",

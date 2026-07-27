@@ -84,3 +84,30 @@ the model is handed. The number says the pipeline works; it says almost nothing
 about the model's language ability. It is included because a real trained
 generative model with an honest limitation is more useful than a flattering
 benchmark.
+
+
+## `dogbehaviour-chat.pt`
+
+`DogChat` — 2.16 M param Transformer decoder you can ask free-text questions,
+conditioned on a clip's detected state (behaviour, vocalisation, arousal,
+valence). Answers in two parts: what the dog would say, and what to do.
+
+```python
+from dogsai.chat import ask, load_chat, DogState
+model, tokenizer, behaviours, metrics = load_chat("models/dogbehaviour-chat.pt")
+state = DogState(behaviour="playing", voice="growl", arousal=0.7, valence=-0.5)
+print(ask(model, tokenizer, behaviours, state, "should i be worried").text)
+```
+
+Validation perplexity 1.06, 49.5% exact free-generation match against 400 held-out
+question/answer pairs (a real number for a paraphrase task, unlike the narrator's
+old 100%: there are multiple valid phrasings per state, so exact string match
+under-counts correct answers).
+
+**Trained entirely on a self-generated dialogue corpus** (21,600 pairs, `dogsai
+train-chat`) — see `dogsai/chat.py`. The advice content is hand-encoded
+conservative dog-behaviour guidance, the same body `dogsai.advise` uses; the model
+learns to select and phrase it across free-text questions, not to originate new
+facts. `ask()` returns an `out_of_domain` score for exactly this reason: a
+conditional decoder answers *anything* fluently, including questions far outside
+training, and that score is the only signal for when to distrust the answer.
