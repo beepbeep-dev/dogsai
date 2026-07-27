@@ -74,12 +74,19 @@ python3 -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.i
 # because this script runs under `set -e` a single 429 killed the whole run.
 # snapshot_download is resumable, so each retry continues rather than restarting.
 for attempt in 1 2 3 4 5 6 7 8; do
-  if python3 -m dogsai.cli fetch "__DATASET__" \
+  # A hard wall-clock timeout on top of the retry loop, not instead of it: two
+  # separate real runs hung indefinitely partway through this download (stopped
+  # making progress, never raised, never returned) rather than failing loudly.
+  # `for attempt in ...; if python3 ...; then break; fi` only ever retries on an
+  # *exception* — a hung process just sits inside the `if` forever and the loop
+  # never gets a second attempt. `timeout` turns "hangs forever" into "fails after
+  # N seconds", which is what actually lets the retry+backoff logic below do its job.
+  if timeout 600 python3 -m dogsai.cli fetch "__DATASET__" \
        --raw-root /root/data/raw --out /root/data/prepared --workers 4; then
     echo "dataset ready after attempt $attempt"
     break
   fi
-  echo "fetch attempt $attempt failed (likely HF rate limiting); backing off"
+  echo "fetch attempt $attempt failed or timed out after 600s; backing off"
   sleep $((attempt * 20))
 done
 test -s /root/data/prepared/train.jsonl || { echo "FATAL: dataset never arrived"; exit 1; }
