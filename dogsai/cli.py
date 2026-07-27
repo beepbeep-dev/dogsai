@@ -530,6 +530,24 @@ def cmd_chat(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_enrich(args: argparse.Namespace) -> int:
+    from .enrich import enrich_dataset
+
+    out_root = Path(args.out) if args.out else Path(args.data_root) / "enriched"
+    stats = enrich_dataset(
+        args.data_root, out_root, splits=args.splits,
+        captions_dir=args.captions, min_count=args.min_count,
+        min_confidence=args.min_confidence, verbose=True,
+    )
+    print(f"\nwrote {out_root}")
+    print("this dataset is self-generated: 'barking' labels came from our own "
+          "audio detector (dogsai/audio.py), not new external annotation. See "
+          "dogsai/enrich.py for what that does and does not guarantee.")
+    print(f"\nnow: dogsai train --data-root {out_root} --task multilabel "
+          f"--behaviours {out_root}/behaviours.txt")
+    return 0
+
+
 def cmd_make_captions(args: argparse.Namespace) -> int:
     from .caption_gen import corpus_stats, generate_captions, save_corpus
     from .dataset import discover_split
@@ -911,6 +929,20 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--interactive", action="store_true")
     chat.add_argument("--device", default=None)
     chat.set_defaults(func=cmd_chat)
+
+    enrich = subparsers.add_parser(
+        "enrich",
+        help="add self-detected 'barking' labels using our own audio detector",
+    )
+    enrich.add_argument("--data-root", required=True)
+    enrich.add_argument("--out", default=None, help="defaults to <data-root>/enriched")
+    enrich.add_argument("--captions", default=None,
+                        help="dir with make-captions output to reuse precomputed audio "
+                             "(defaults to <data-root>/captions; computed live if absent)")
+    enrich.add_argument("--splits", nargs="+", default=["train", "val"])
+    enrich.add_argument("--min-count", type=int, default=1)
+    enrich.add_argument("--min-confidence", type=float, default=0.0)
+    enrich.set_defaults(func=cmd_enrich)
 
     captions = subparsers.add_parser(
         "make-captions",

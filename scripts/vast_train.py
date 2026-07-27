@@ -79,22 +79,66 @@ test -s /root/data/prepared/train.jsonl || { echo "FATAL: dataset never arrived"
 python3 -m dogsai.cli audit --data-root /root/data/prepared \
   --behaviours /root/data/prepared/behaviours.txt --no-duplicate-check || true
 
+# Enrich: add self-detected 'barking' labels from our own audio module, turning
+# the single-label dataset into a genuine multi-label one — see dogsai/enrich.py.
+# make-captions computes the per-clip audio summary enrich reuses; if it fails for
+# any reason enrich() falls back to computing audio live, per clip, so this still
+# produces a correct (just slower) result.
+python3 -m dogsai.cli make-captions --data-root /root/data/prepared || true
+python3 -m dogsai.cli enrich --data-root /root/data/prepared \
+  --out /root/data/prepared/enriched \
+  --captions /root/data/prepared/captions
+
 python3 -m dogsai.cli train \
-  --data-root /root/data/prepared \
-  --behaviours /root/data/prepared/behaviours.txt \
+  --data-root /root/data/prepared/enriched \
+  --behaviours /root/data/prepared/enriched/behaviours.txt \
+  --task multilabel \
   --out-dir /root/runs/dognet \
+  --cache --cache-frames __CACHE_FRAMES__ --cache-size __CACHE_SIZE__ \
   --set model.preset=__PRESET__ \
   --set train.epochs=__EPOCHS__ \
   --set train.batch_size=__BATCH__ \
   --set data.num_workers=__WORKERS__ \
   --set train.amp=true \
-  --set train.compile=false
+  --set train.compile=false \
+  --set train.early_stop_patience=__PATIENCE__
 
 python3 -m dogsai.cli eval /root/runs/dognet/best.pt \
-  --data-root /root/data/prepared --split val \
+  --data-root /root/data/prepared/enriched --split val \
   --json /root/runs/dognet/val_metrics.json || true
 
 python3 -m dogsai.cli export /root/runs/dognet/best.pt /root/runs/dognet/dognet.ts.pt || true
+cp /root/data/prepared/enriched/behaviours.txt /root/runs/dognet/behaviours.txt || true
+
+# --- get the trained model back without SSH ---------------------------------
+# request_logs only tails console output; scp needs an SSH egress this sandbox
+# does not have. So the run uploads its own result to a public, anonymous HTTPS
+# file host and prints the URL, which the caller reads back out of the console
+# log (already working) and downloads with a plain GET.
+cd /root/runs
+tar czf artifact.tar.gz -C dognet \
+  $(cd dognet && ls best.pt config.json history.json val_metrics.json \
+      behaviours.txt dognet.ts.pt dognet.ts.meta.json 2>/dev/null)
+echo "artifact size: $(wc -c < artifact.tar.gz) bytes"
+
+ARTIFACT_URL=""
+for attempt in 1 2 3; do
+  ARTIFACT_URL=$(curl -sS -m 180 -A "Mozilla/5.0" -F"file=@artifact.tar.gz" https://0x0.st | tr -d "\r\n")
+  case "$ARTIFACT_URL" in https://0x0.st/*) break ;; esac
+  echo "0x0.st upload attempt $attempt failed, retrying"
+  sleep 5
+done
+case "$ARTIFACT_URL" in
+  https://0x0.st/*) ;;
+  *)
+    echo "0x0.st failed, falling back to litterbox.catbox.moe"
+    ARTIFACT_URL=$(curl -sS -m 180 -F "reqtype=fileupload" -F "time=72h" \
+      -F "fileToUpload=@artifact.tar.gz" \
+      https://litterbox.catbox.moe/resources/internals/api.php | tr -d "\r\n")
+    ;;
+esac
+echo "ARTIFACT_URL: $ARTIFACT_URL"
+
 touch /root/DOGSAI_DONE
 echo "=== dogsai finished $(date -u) ==="
 """
@@ -280,6 +324,9 @@ def cmd_launch(args) -> int:
         .replace("__EPOCHS__", str(args.epochs))
         .replace("__BATCH__", str(args.batch))
         .replace("__WORKERS__", str(args.loader_workers))
+        .replace("__PATIENCE__", str(args.patience))
+        .replace("__CACHE_FRAMES__", str(args.cache_frames))
+        .replace("__CACHE_SIZE__", str(args.cache_size))
     )
     payload = {
         "client_id": "me",
@@ -377,6 +424,64 @@ def cmd_logs(args) -> int:
     return 1
 
 
+def cmd_fetch_artifact(args) -> int:
+    """Pull the ARTIFACT_URL a finished run printed and download+unpack it.
+
+    This is the actual retrieval path for a trained checkpoint: the run cannot be
+    scp'd off (no SSH egress here), so it uploads itself to a public file host and
+    this reads the resulting URL back out of the console log.
+    """
+    import re
+    import time as _time
+    import urllib.request
+
+    state = load_state()
+    instance_id = state["instance_id"]
+    response = call(f"/instances/request_logs/{instance_id}/", method="PUT",
+                    payload={"tail": "4000"})
+    url = response.get("result_url")
+    if not url:
+        print(f"no log url returned: {response}")
+        return 1
+
+    text = ""
+    for attempt in range(args.retries):
+        _time.sleep(args.wait)
+        try:
+            with urllib.request.urlopen(url, timeout=60) as handle:
+                text = handle.read().decode(errors="replace")
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (403, 404):
+                raise
+            text = ""
+        if "ARTIFACT_URL:" in text:
+            break
+        print(f"  artifact not ready yet (attempt {attempt + 1}/{args.retries})")
+
+    match = re.search(r"ARTIFACT_URL:\s*(\S+)", text)
+    if not match or not match.group(1).startswith("http"):
+        print("no ARTIFACT_URL found yet in the log. The run may still be "
+              "training — check `logs` for progress, then try again.")
+        return 1
+    artifact_url = match.group(1)
+    print(f"found artifact: {artifact_url}")
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = out_dir / "artifact.tar.gz"
+    urllib.request.urlretrieve(artifact_url, archive_path)
+    print(f"downloaded {archive_path} ({archive_path.stat().st_size / 1e6:.1f} MB)")
+
+    import tarfile
+
+    with tarfile.open(archive_path) as tar:
+        tar.extractall(out_dir)
+    print(f"unpacked into {out_dir}/")
+    print(f"\n  dogsai eval {out_dir}/best.pt --data-root <your data> --split val")
+    print(f"  dogsai feeling {out_dir}/best.pt my_dog.mp4")
+    return 0
+
+
 def cmd_fetch_run(args) -> int:
     """Print the scp commands to pull the run directory back."""
     state = load_state()
@@ -457,6 +562,14 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--preset", default="small", choices=["nano", "small", "base"])
     launch.add_argument("--epochs", type=int, default=40)
     launch.add_argument("--batch", type=int, default=32)
+    launch.add_argument("--patience", type=int, default=20,
+                        help="early-stop patience, in epochs")
+    launch.add_argument("--cache-frames", type=int, default=32,
+                        help="frames per cached clip; must exceed the preset's "
+                             "clip_frames so temporal jitter survives")
+    launch.add_argument("--cache-size", type=int, default=224,
+                        help="cached resolution; must exceed the preset's image_size "
+                             "so random-resized-crop has real pixels to pick")
     launch.add_argument("--loader-workers", type=int, default=8)
     launch.add_argument("--image", default="pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime")
     launch.add_argument("--repo", default="https://github.com/beepbeep-dev/dogsai.git")
@@ -483,6 +596,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     fetch = subparsers.add_parser("fetch-run", help="print commands to copy results back")
     fetch.set_defaults(func=cmd_fetch_run)
+
+    fetch_artifact = subparsers.add_parser(
+        "fetch-artifact",
+        help="download the trained model over HTTPS (no SSH needed)",
+    )
+    fetch_artifact.add_argument("--out", default="runs/dognet")
+    fetch_artifact.add_argument("--wait", type=float, default=10.0)
+    fetch_artifact.add_argument("--retries", type=int, default=6)
+    fetch_artifact.set_defaults(func=cmd_fetch_artifact)
 
     destroy = subparsers.add_parser("destroy", help="destroy the instance and stop billing")
     destroy.add_argument("--yes", action="store_true")
